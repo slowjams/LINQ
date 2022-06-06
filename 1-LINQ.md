@@ -47,9 +47,18 @@ public static partial class Enumerable
                                                                           Func<TInner, TKey> innerKeySelector, 
                                                                           Func<TOuter, TInner, TResult> resultSelector);
 
-
+   //--------------------------------V    
    public static IEnumerable<IGrouping<TKey, TSource>> GroupBy<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector); 
+
+   public static ILookup<TKey, TElement> ToLookup<TSource, TKey, TElement>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector);  // more advanced than GroupBy
   
+   public interface ILookup<TKey, TElement> : IEnumerable<IGrouping<TKey, TElement>> 
+   {
+      int Count { get; }
+      IEnumerable<TElement> this[TKey key] { get; }
+      bool Contains(TKey key);
+   }
+   //--------------------------------Ʌ
    public static IEnumerable<TResult> GroupJoin<TOuter, TInner, TKey, TResult>(this IEnumerable<TOuter> outer, 
                                                                                IEnumerable<TInner> inner, 
                                                                                Func<TOuter, TKey> outerKeySelector,
@@ -65,6 +74,34 @@ public static partial class Enumerable
    public static IOrderedEnumerable<TSource> ThenByDescending<TSource, TKey>(this IOrderedEnumerable<TSource> source, Func<TSource, TKey> keySelector, IComparer<TKey>? comparer);
                                                                   
    // ...
+   public static IEnumerable<TSource> Take<TSource>(this IEnumerable<TSource> source, int count)
+   {
+      return count <= 0 ? Empty<TSource>() : TakeIterator<TSource>(source, count);   
+   }
+
+   public static bool All<TSource>(this IEnumerable<TSource> source, Func<TSource, bool> predicate) // Any works unexpected, it return true when source is null when source is empty
+   {
+      foreach (TSource element in source) {   // <------------------- if source is empty, it doesn't enumerate in foreach, so it return true, which we need to pay attention to 
+         if (!predicate(element)) {
+            return false;
+         }
+      }
+
+      return true;
+   }
+
+   public static bool Any<TSource>(this IEnumerable<TSource> source, Func<TSource, bool> predicate)   // Any works expected when the source is empty
+   {
+      foreach (TSource element in source) {
+         if (predicate(element)) {
+            return true;
+         }
+      }
+
+      return false;
+   }
+
+   public static IEnumerable<TSource> Distinct<TSource>(this IEnumerable<TSource> source, IEqualityComparer<TSource> comparer);  // check CLR via C# Walkthrough Chapter 5
 
    public static TSource Aggregate<TSource>(this IEnumerable<TSource> source, Func<TSource, TSource, TSource> func)
    {
@@ -82,6 +119,39 @@ public static partial class Enumerable
          return result;  
       }
    }
+   
+   //--------------------------------V
+   public static IEnumerable<TResult> Empty<TResult>()
+   {
+      return EmptyEnumerable<TResult>.Instance;
+   }
+
+   internal class EmptyEnumerable<TElement>
+   {
+      public static readonly TElement[] Instance = new TElement[0];
+   }
+   //--------------------------------Ʌ
+
+   //--------------------------------V
+   public IEnumerable<T> OfType<T>(this IEnumerable source)   // doesn't throw exception
+   {
+      foreach(object o in source) 
+      {
+         if(o is T) 
+         {
+            yield return (T) o;
+         }     
+      }
+      
+   }
+
+   public IEnumerable<T> Cast<T>(this IEnumerable source) {  // throw exception when the curr item cannot be casted 
+      foreach(object o in source) 
+      {
+         yield return (T) o;
+      }        
+   }
+   //--------------------------------Ʌ
 
    public static TAccumulate Aggregate<TSource, TAccumulate>(this IEnumerable<TSource> source, TAccumulate seed, Func<TAccumulate, TSource, TAccumulate> func)
    {
@@ -98,7 +168,7 @@ public static partial class Enumerable
    public static TResult Aggregate<TSource, TAccumulate, TResult>(this IEnumerable<TSource> source, 
                                                                   TAccumulate seed, 
                                                                   Func<TAccumulate, TSource, TAccumulate> func, 
-                                                                  Func<TAccumulate, TResult> resultSelector)
+                                                                  Func<TAccumulate, TResult> resultSelector)     // doesn' look very useful
    {
       TAccumulate result = seed;
       
@@ -204,8 +274,6 @@ private sealed partial class SelectListIterator<TSource, TResult> : Iterator<TRe
 //---------------------------------------------------------------Ʌ
 ```
 
-## Demystifying Expression Trees
-- To do
 
 ## Demystifying `IQueryable<T>`
 -To do
@@ -337,18 +405,26 @@ public interface IGrouping<TKey,TElement> : IEnumerable<TElement>
 }
 
 List<Developer> developers = new List<Developer>() {
-   new Developer { Name = "Paolo", Language = "C#", Title = "Senior" },
-   new Developer { Name = "Marco", Language = "C#", Title = "Senior" },
-   new Developer { Name = "Frank", Language = "VB.NET", Title = "Junior" },
+   new Developer { Name = "Michael", Language = "C#", Title = "Senior" },
+   new Developer { Name = "Matt", Language = "C#", Title = "Mid" },
+   new Developer { Name = "John", Language = "C#", Title = "Junior" },
+   new Developer { Name = "Tom", Language = "Javascript", Title = "Senior" },
+   new Developer { Name = "Andy", Language = "Javascript", Title = "Junior" },
+   new Developer { Name = "Justin", Language = "SQL", Title = "Grad" },
 };
 
 //---------V
-var grouped = from d in developers
-              group d by d.Language;  // key is always after `by` keyword <---------------------------------------------
+var q = from d in developers
+        group d by d.Language;  // key is always after `by` keyword <---------------------------------------------
 
                                                                  // key selector
-IEnumerable<IGrouping<string, Developer>> a = developers.GroupBy(d => d.Language);  // a contains 2 IGrouping instance, each instance has Key property and Developer[],
+IEnumerable<IGrouping<string, Developer>> q = developers.GroupBy(d => d.Language);  // a contains 3 IGrouping instance, each instance has Key property and Developer[],
                                                                                     // since there is no element selector, the default one `Developer` is used as element
+/*
+[0] { Key = "C#", IGrouping<string, Developer> { Michael, Matt, John }  }
+[1] { Key = "Javascript", IGrouping<string, Developer> { Tom, Andy } }
+[2] { Key = "SQL", IGrouping<string, Developer> { Justin } }
+*/
 //---------Ʌ
 
 //---------V
@@ -356,7 +432,7 @@ var grouped = from d in developers
               group d.Name by d.Language;  // element is always between `group` and `by` keywords  <--------------------
 
                                                           // key selector      element selector
-IEnumerable<IGrouping<string, string>> b = developers.GroupBy(d => d.Language, d => d.Name);  // b also contains 2 IGrouping instance, and use Name string as element
+IEnumerable<IGrouping<string, string>> b = developers.GroupBy(d => d.Language, d => d.Name);  // b also contains 3 IGrouping instance, and use Name string as element
 //---------Ʌ
 ```
 
@@ -511,7 +587,7 @@ var tmp = from x in people
 var query = from y in tmp         
             select y.ToUpper();
 
-// Final translation into methods as:
+// final translation into methods as:
 var query = people.Select(x => x.Name)
                   .Select(y => y.ToUpper());
 
@@ -591,7 +667,31 @@ IEnumerable<a`> a = categories.Join(products, c => c.IdCategory, p => p.IdCatego
  */
 ```
 
-`GroupJoin` ("join into") is equivalent to "left outter join" in SQL 
+let's change the data and make it no result and see it is really "inner join":
+
+```C#
+Category[] categories = new Category[] {
+   new Category { IdCategory = 11, Name = "Pasta"},
+   new Category { IdCategory = 22, Name = "Beverages"},
+   new Category { IdCategory = 33, Name = "Other food"},
+};
+// products stay the same
+
+var q1 = from c in categories
+         join p in products on c.IdCategory equals p.IdCategory          
+         select p;
+
+var q2 = from c in categories
+         join p in products on c.IdCategory equals p.IdCategory          
+         select c;
+
+// both q1 and q2 are "Empty", which is like:
+var q1 = Enumerable.Empty<Product>();
+
+var q2 = Enumerable.Empty<Category>();
+```
+
+`GroupJoin` ("join into") is equivalent to "left outter join" in in SQL: (well, not quite, but 90%, to make it 100%, use `DefaultIfEmpty`)
 
 ```C#
 //retn typ is IGrouping<TKey, TElement>  <------------------------------------
@@ -617,13 +717,13 @@ public static IEnumerable<TResult> GroupJoin<TOuter, TInner, TKey, TResult>(this
 ```C#
 //---------------V
 var q = from c in categories                                     // IEnumerable<Product>  
-        join p in products on c.IdCategory equals p.IdCategory into productsByCategory     //productsByCategory is actually `Grouping<string, Product>`
+        join p in products on c.IdCategory equals p.IdCategory into productsByCategory     //productsByCategory is actually `IGrouping<string, Product>`
         select productsByCategory;
 
 IEnumerable<IEnumerable<Product>> q = categories.GroupJoin(products, c => c.IdCategory, p => p.IdCategory, (c, productsByCategory) => productsByCategory);
 
 // it is the same as below
-IEnumerable<IIGrouping<String, Product>> q = ...;  // even though IGrouping does inherit IEnumerable<out T>, but you can't do casting here becuase of the covariant `out` keyword
+IEnumerable<IGrouping<String, Product>> q = ...;  // even though IGrouping does inherit IEnumerable<out T>, but you can't do casting here becuase of the covariant `out` keyword
 
 /* q contains 3 instances
 
@@ -639,11 +739,11 @@ note that [2] is actually EmptyPartition<Product> instance, I just use IGrouping
 //---------------V
 var q = from c in categories.
         join p in products on c.IdCategory equals p.IdCategory into productsByCategory
-        from pc in productsByCategory
+        from pc in productsByCategory    // second from get translated into SelectMany
         select pc;
 
 // compiler translates the query into:
-var q = categories.GroupJoin(products, c => c.IdCategory, p => p.IdCategory,  (c, productsByCategory) => new { c, productsByCategory})
+var q = categories.GroupJoin(products, c => c.IdCategory, p => p.IdCategory,  (c, productsByCategory) => new { c, productsByCategory}) // make you can use c in query expression
                   .SelectMany(anon => anon.productsByCategory, (anon, pc) => pc);    // anon just means anonymous type
 
 // but it is equivalent to this one below, because we don't really need category information 
@@ -655,7 +755,7 @@ IEnumerable<Product> q = categories.GroupJoin(products, c => c.IdCategory, p => 
          join p in products on c.IdCategory equals p.IdCategory into productsByCategory    
          select new {                                            
             CategoryID = c.IdCategory,
-            CategoryName = c.Name,
+            CategoryName = c.Name,          // you can access c here because of the projection 
             Products = productsByCategory
          };
                                                                               // productsByCategory is IEnumerable<Product> 
@@ -700,6 +800,50 @@ var q = from c in categories()
 var q = categories.GroupJoin(c => c.IdCategory, p => p.IdCategory, (c, _) => c);
 ```
 
+## From Inner Join to Outer Join
+
+There are two inner joins form in Linq:
+
+```C#
+// standard inner join
+var query1 =
+    from person in people
+    join pet in pets on person equals pet.Owner
+    select new
+    {
+        OwnerName = person.FirstName,
+        PetName = pet.Name
+    };
+
+// you can also use GroupJoin to performance an inner join:
+var query2 =
+    from person in people
+    join pet in pets on person equals pet.Owner into gj
+    from subpet in gj
+    select new
+    {
+        OwnerName = person.FirstName,
+        PetName = subpet.Name
+    };
+
+//record class Person(string FirstName, string LastName);
+//record class Pet(string Name, Person Owner);
+```
+
+you might ask why use `GroupJoin` (join into) to perform inner join? well, it is prerequiste to make 100% outer join combined with `DefaultIfEmpty()`:
+
+```C#
+var query =
+    from person in people
+    join pet in pets on person equals pet.Owner into gj
+    from subpet in gj.DefaultIfEmpty()
+    select new
+    {
+        person.FirstName,
+        PetName = subpet?.Name ?? string.Empty
+    };
+```
+
 
 ## `Let` Clause
 
@@ -726,6 +870,8 @@ employees.Select(x => new { x, tax = x.ComputeTax() })
          .Select(z => z.x.LastName + ": " + z.tax);
 ```
 
+**so you can think that `into` always project outer range variable**
+
 Now you know the idea that how to keep alive of range variable's scope, let's see another exampl in multi-join with extending(or faking) range variable's scope:
 
 ```C#
@@ -749,3 +895,286 @@ var q = from person in people
 var q = people.Join(cats, person => person, cat => cat.Owner, (person, cat) => new { person, cat })
               .Join(dogs, anon => anon.person, dog => dog.Owner, (anon, dog) => new { anon.person, anon.cat, dog });
 ```
+
+
+
+## Aggregate
+
+Aggregate includes `Sum`, `Max`, `Min` etc and `Aggregate`. Standard aggregate operators like `Sum`, `Max` etc are very simple, let's look at how to use `Aggregate`
+
+```C#
+Customer[] customers = GetCustomers();  // new Customer {Name = "Paolo", Orders = new Order[] {  new Order { IdOrder = 10010, Quantity = 3, IdProduct = 1 }} ...
+Product[] products = GetProducts();     // new Product {IdProduct = 1, Price = 10 }
+
+// extract the most expensive order for each custome
+var q = from c in customers
+        join o in (
+             from c in customers
+             from o in c.Orders
+             join p in products on o.IdProduct equals p.IdProduct
+             select new { c.Name, o.IdProduct, OrderAmount = o.Quantity * p.Price }
+             ) on c.Name equals o.Name into orders
+        select new { c.Name, MaxOrderAmount = orders.Aggregate((curr, next) => curr.OrderAmount > next.OrderAmount ? curr : next).OrderAmount };
+
+/*
+{ Name = Paolo, MaxOrderAmount = 100 }
+{ Name = Marco, MaxOrderAmount = 600 }
+{ Name = James, MaxOrderAmount = 600 }
+{ Name = Frank, MaxOrderAmount = 1000 }
+*/
+
+
+// calculates the total amount ordered for each product
+ var q = from p in products
+         join o in (
+              from c in customers
+              from o in c.Orders
+              join p in products on o.IdProduct equals p.IdProduct
+              select new { c.Name, o.IdProduct, OrderAmount = o.Quantity * p.Price }
+         ) on p.IdProduct equals o.IdProduct into productsGroup              //it's (accum, curr) that fits the context, not (accum, next), check the source code above you'll see
+         select new { p.IdProduct, TotalOrderedAmount = productsGroup.Aggregate(0m, (accum, curr) => accum + curr.OrderAmount) };
+
+/*
+{ IdProduct = 1, TotalOrderedAmount = 130 }
+{ IdProduct = 2, TotalOrderedAmount = 100 }
+{ IdProduct = 3, TotalOrderedAmount = 1200 }
+{ IdProduct = 4, TotalOrderedAmount = 0 }
+{ IdProduct = 5, TotalOrderedAmount = 1000 }
+{ IdProduct = 6, TotalOrderedAmount = 0 }
+*/
+```
+
+## Other Operators
+
+```C#
+var list = new int[] { 1, 2, 3, 4, 5, -1, -2 };
+
+var q = list.Where(x => x <= 3);       // 1, 2, 3, -1, -2
+
+var q = list.TakeWhile(x => x <= 3);   // 1, 2, 3
+
+var q = list.SkipWhile(x => x <= 3);   // 4, 5, -1, -2
+```
+
+-------------------------------------------------------------------------------------------------------
+
+## Demystifying Expression Trees
+
+```C#
+public sealed class Expression<TDelegate> : LambdaExpression 
+{
+   public TDelegate Compile();
+   public TDelegate Compile(bool preferInterpretation);
+   public TDelegate Compile(DebugInfoGenerator debugInfoGenerator);
+   public Expression<TDelegate> Update(Expression body, IEnumerable<ParameterExpression> parameters);
+   protected internal override Expression Accept(ExpressionVisitor visitor);
+}
+
+
+public abstract class LambdaExpression : Expression
+{
+   //------------------------------V
+   public Expression Body { get; }
+   public ReadOnlyCollection<ParameterExpression> Parameters { get; }
+   //------------------------------Ʌ
+
+   public sealed override ExpressionType NodeType { get; }
+   public Type ReturnType { get; }
+   public bool TailCall { get; }
+   public string Name { get; }
+   public sealed override Type Type { get; }
+
+   public Delegate Compile();
+   public Delegate Compile(bool preferInterpretation);
+   public Delegate Compile(DebugInfoGenerator debugInfoGenerator);
+}
+
+
+public abstract class Expression 
+{
+   protected Expression();
+   protected Expression(ExpressionType nodeType, Type type);
+
+   //------------------------------------V
+   public virtual ExpressionType NodeType { get; }
+   public virtual Type Type { get; }
+   //------------------------------------Ʌ
+
+   public virtual bool CanReduce { get; }
+
+   //-------------------------------------------------------------------V
+   public static BinaryExpression Add(Expression left, Expression right)  // AddAssign, AddAssignChecked, AddChecked
+   {
+      return Add(left, right, null);
+   }
+
+   public static BinaryExpression Add(Expression left, Expression right, MethodInfo method) 
+   {
+      method = BinaryCoreCheck ("op_Addition", left, right, method);
+
+      return MakeSimpleBinary (ExpressionType.Add, left, right, method);
+   }
+
+   private static MethodInfo BinaryCoreCheck (string oper_name, Expression left, Expression right, MethodInfo method) 
+   {
+      // if (left == null) or (right == null) throw new ArgumentNullException
+      if (method != null)
+      {
+         if (method.ReturnType == typeof (void))
+            throw new ArgumentException ("Must have only two parameters", "method");
+         
+         if (!method.IsStatic)
+            throw new ArgumentException ("Method must be static", "method");
+         var parameters = method.GetParameters();
+
+         if (parameters.Length != 2)
+				throw new ArgumentException ("Must have only two parameters", "method");
+
+         if (!IsAssignableToParameterType (left.Type, parameters [0]))
+            throw new InvalidOperationException ("left-side argument type does not match left expression type");
+         
+         if (!IsAssignableToParameterType (right.Type, parameters [1]))
+            throw new InvalidOperationException ("right-side argument type does not match right expression type");
+         
+         return method;   // <-------------------------------
+      } 
+      else {
+         if (oper_name != null) 
+         {
+            method = GetBinaryOperator(oper_name, ultype, left, right);
+            if (method != null)
+               return method;
+         }
+
+         // ...
+      }
+   }
+
+   static MethodInfo GetBinaryOperator(string oper_name, Type on_type, Expression left, Expression right)
+	{
+		 MethodInfo [] methods = on_type.GetMethods(PublicStatic);
+
+		 foreach (var method in methods) {
+			 if (method.Name != oper_name)
+				 continue;
+
+			 var parameters = method.GetParameters ();
+			 if (parameters.Length != 2)
+				 continue;
+
+			 if (method.IsGenericMethod)
+				 continue;
+
+			 if (!IsAssignableToParameterType (left.Type, parameters [0]))
+				 continue;
+
+			 if (!IsAssignableToParameterType (right.Type, parameters [1]))
+				 continue;
+
+				return method;
+		 }
+
+		 return null;
+	}
+   //-------------------------------------------------------------------Ʌ
+
+   public static BinaryExpression And(Expression left, Expression right);  // AndAlso, AndAssign
+   public static BinaryExpression Or(Expression left, Expression right);
+   public static BinaryExpression Multiply(Expression left, Expression right);
+   // ...
+   public static IndexExpression ArrayAccess(Expression array, IEnumerable<Expression> indexes);
+   public static ConditionalExpression Condition(Expression test, Expression ifTrue, Expression ifFalse);
+   public static MethodCallExpression Call(MethodInfo method, params Expression[] arguments);
+   public static ConstantExpression Constant(object value);
+   // ...
+
+   public override string ToString();
+   public virtual Expression Reduce();
+   protected internal virtual Expression Accept(ExpressionVisitor visitor);
+   protected internal virtual Expression VisitChildren(ExpressionVisitor visitor);
+}
+
+public enum ExpressionType 
+{
+   Add, AddChecked, And, ArrayIndex,
+   Call, Coalesce, Conditional, Constant,
+   Divide, Equal, GreaterThan, GreaterThanOrEqual, 
+   Invoke, Lambda, IsTrue, IsFalse,
+   // ...
+}
+```
+
+```C#
+public class BinaryExpression : Expression
+{
+   internal BinaryExpression(Expression left, Expression right) 
+   {
+      Left = left;
+      Right = right;
+   }
+   
+   //------------------------------V
+   public Expression Left { get; }
+   public Expression Right { get; }
+   public MethodInfo Method { get; }
+   //-------------------------------Ʌ
+
+   public sealed override ExpressionType NodeType { get; }  // can be a lot of different ExpressionType
+
+   public LambdaExpression Conversion { get; }
+   public bool IsLifted { get; }
+   public bool IsLiftedToNull { get; }
+   
+   public BinaryExpression Update(Expression left, LambdaExpression conversion, Expression right);
+}
+
+public class MethodCallExpression : Expression, IArgumentProvider
+{
+   public ReadOnlyCollection<Expression> Arguments { get; }
+   public MethodInfo Method { get; }
+   public sealed override ExpressionType NodeType { get; }
+   public sealed override Type Type { get; }
+
+   //------------------------------V
+   public Expression Object { get; }
+   //------------------------------Ʌ
+
+   public MethodCallExpression Update(Expression @object, IEnumerable<Expression> arguments);
+   // ...
+
+   public interface IArgumentProvider {
+      int ArgumentCount { get; }
+      Expression GetArgument(int index);
+   }
+}
+
+public class ConditionalExpression : Expression 
+{
+   public Expression IfFalse { get; }
+   public Expression IfTrue { get; }
+   public Expression Test { get; }
+
+   public ConditionalExpression Update(Expression test, Expression ifTrue, Expression ifFalse);
+}
+
+public class ConstantExpression : Expression
+{
+   //--------------------------V
+   public object Value { get; }
+   //---------------------------Ʌ
+
+   public sealed override ExpressionType NodeType { get; }  // always ExpressionType.Constant
+}
+
+public class ParameterExpression : Expression
+{
+   public bool IsByRef { get; }
+   public string Name { get; }
+}
+```
+
+
+
+???
+`Expression<Func<double, double, double>> TriangleAreaExp = (b, h) => b * h / 2;` TriangleAreaExp is not a delegate; instead, it is a reference to the root node of an expression tree.
+???
