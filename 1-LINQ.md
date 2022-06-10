@@ -897,7 +897,6 @@ var q = people.Join(cats, person => person, cat => cat.Owner, (person, cat) => n
 ```
 
 
-
 ## Aggregate
 
 Aggregate includes `Sum`, `Max`, `Min` etc and `Aggregate`. Standard aggregate operators like `Sum`, `Max` etc are very simple, let's look at how to use `Aggregate`
@@ -961,6 +960,7 @@ var q = list.SkipWhile(x => x <= 3);   // 4, 5, -1, -2
 ## Demystifying Expression Trees
 
 ```C#
+//---------------------------------------V
 public sealed class Expression<TDelegate> : LambdaExpression 
 {
    public TDelegate Compile();
@@ -969,16 +969,15 @@ public sealed class Expression<TDelegate> : LambdaExpression
    public Expression<TDelegate> Update(Expression body, IEnumerable<ParameterExpression> parameters);
    protected internal override Expression Accept(ExpressionVisitor visitor);
 }
+//---------------------------------------Ʌ
 
-
+//------------------------------------V
 public abstract class LambdaExpression : Expression
 {
-   //------------------------------V
    public Expression Body { get; }
    public ReadOnlyCollection<ParameterExpression> Parameters { get; }
-   //------------------------------Ʌ
 
-   public sealed override ExpressionType NodeType { get; }
+   public sealed override ExpressionType NodeType => ExpressionType.Lambda;
    public Type ReturnType { get; }
    public bool TailCall { get; }
    public string Name { get; }
@@ -987,9 +986,15 @@ public abstract class LambdaExpression : Expression
    public Delegate Compile();
    public Delegate Compile(bool preferInterpretation);
    public Delegate Compile(DebugInfoGenerator debugInfoGenerator);
+
+   protected internal override Expression Accept(ExpressionVisitor visitor)
+   {
+      return visitor.VisitLambda(this);
+   }
 }
+//------------------------------------Ʌ
 
-
+//-------------------------------------------------------------------------------V
 public abstract class Expression 
 {
    protected Expression();
@@ -1002,7 +1007,6 @@ public abstract class Expression
 
    public virtual bool CanReduce { get; }
 
-   //-------------------------------------------------------------------V
    public static BinaryExpression Add(Expression left, Expression right)  // AddAssign, AddAssignChecked, AddChecked
    {
       return Add(left, right, null);
@@ -1010,12 +1014,12 @@ public abstract class Expression
 
    public static BinaryExpression Add(Expression left, Expression right, MethodInfo method) 
    {
-      method = BinaryCoreCheck ("op_Addition", left, right, method);
+      method = BinaryCoreCheck ("op_Addition", left, right, method);   // + operator gets compiled into a static method called op_Addition
 
       return MakeSimpleBinary (ExpressionType.Add, left, right, method);
    }
 
-   private static MethodInfo BinaryCoreCheck (string oper_name, Expression left, Expression right, MethodInfo method) 
+   private static MethodInfo BinaryCoreCheck(string oper_name, Expression left, Expression right, MethodInfo method) 
    {
       // if (left == null) or (right == null) throw new ArgumentNullException
       if (method != null)
@@ -1076,23 +1080,27 @@ public abstract class Expression
 
 		 return null;
 	}
-   //-------------------------------------------------------------------Ʌ
 
    public static BinaryExpression And(Expression left, Expression right);  // AndAlso, AndAssign
    public static BinaryExpression Or(Expression left, Expression right);
    public static BinaryExpression Multiply(Expression left, Expression right);
+   public static BinaryExpression MakeBinary(ExpressionType binaryType, Expression left, Expression right);
    // ...
    public static IndexExpression ArrayAccess(Expression array, IEnumerable<Expression> indexes);
    public static ConditionalExpression Condition(Expression test, Expression ifTrue, Expression ifFalse);
    public static MethodCallExpression Call(MethodInfo method, params Expression[] arguments);
+   public static MethodCallExpression ArrayIndex(Expression array, IEnumerable<Expression> indexes);
+   public static InvocationExpression Invoke(Expression expression, IEnumerable<Expression> arguments);
    public static ConstantExpression Constant(object value);
    // ...
 
    public override string ToString();
    public virtual Expression Reduce();
-   protected internal virtual Expression Accept(ExpressionVisitor visitor);
+
+   protected internal virtual Expression Accept(ExpressionVisitor visitor);   //<------------------------------
    protected internal virtual Expression VisitChildren(ExpressionVisitor visitor);
 }
+//-------------------------------------------------------------------------------Ʌ
 
 public enum ExpressionType 
 {
@@ -1100,11 +1108,13 @@ public enum ExpressionType
    Call, Coalesce, Conditional, Constant,
    Divide, Equal, GreaterThan, GreaterThanOrEqual, 
    Invoke, Lambda, IsTrue, IsFalse,
+   Multiply, Modulo,
    // ...
 }
 ```
 
 ```C#
+//---------------------------V
 public class BinaryExpression : Expression
 {
    internal BinaryExpression(Expression left, Expression right) 
@@ -1113,20 +1123,46 @@ public class BinaryExpression : Expression
       Right = right;
    }
    
-   //------------------------------V
    public Expression Left { get; }
    public Expression Right { get; }
    public MethodInfo Method { get; }
-   //-------------------------------Ʌ
 
-   public sealed override ExpressionType NodeType { get; }  // can be a lot of different ExpressionType
+   public sealed override ExpressionType NodeType { get; }  // can be a lot of different ExpressionType such as Add, Divide
 
-   public LambdaExpression Conversion { get; }
+   public LambdaExpression Conversion => GetConversion();
+   internal virtual LambdaExpression? GetConversion() => null;
+
    public bool IsLifted { get; }
    public bool IsLiftedToNull { get; }
    
-   public BinaryExpression Update(Expression left, LambdaExpression conversion, Expression right);
+   protected internal override Expression Accept(ExpressionVisitor visitor) 
+   {
+      return visitor.VisitBinary(this);
+   }
+
+   public BinaryExpression Update(Expression left, LambdaExpression conversion, Expression right)
+   {
+      if (left == Left && right == Right && conversion == Conversion)
+      {
+         return this;
+      }
+
+      if (IsReferenceComparison) 
+      {
+         if (NodeType == ExpressionType.Equal)
+         {
+            return Expression.ReferenceEqual(left, right);
+         }
+         else
+         {
+            return Expression.ReferenceNotEqual(left, right);
+         }
+      }
+
+      return Expression.MakeBinary(NodeType, left, right, IsLiftedToNull, Method, conversion);
+   }
 }
+//---------------------------Ʌ
 
 public class MethodCallExpression : Expression, IArgumentProvider
 {
@@ -1135,9 +1171,7 @@ public class MethodCallExpression : Expression, IArgumentProvider
    public sealed override ExpressionType NodeType { get; }
    public sealed override Type Type { get; }
 
-   //------------------------------V
-   public Expression Object { get; }
-   //------------------------------Ʌ
+   public Expression Object { get; }   // returned Expression represents the instance for instance method calls or null for static method calls.
 
    public MethodCallExpression Update(Expression @object, IEnumerable<Expression> arguments);
    // ...
@@ -1146,6 +1180,17 @@ public class MethodCallExpression : Expression, IArgumentProvider
       int ArgumentCount { get; }
       Expression GetArgument(int index);
    }
+}
+
+public sealed class InvocationExpression : Expression, IArgumentProvider
+{
+   public ReadOnlyCollection<Expression> Arguments { get; }
+   public Expression Expression { get; }
+   
+   public sealed override ExpressionType NodeType { get; }
+   public sealed override Type Type { get; }
+
+   public InvocationExpression Update(Expression expression, IEnumerable<Expression> arguments);
 }
 
 public class ConditionalExpression : Expression 
@@ -1159,9 +1204,7 @@ public class ConditionalExpression : Expression
 
 public class ConstantExpression : Expression
 {
-   //--------------------------V
    public object Value { get; }
-   //---------------------------Ʌ
 
    public sealed override ExpressionType NodeType { get; }  // always ExpressionType.Constant
 }
@@ -1173,8 +1216,149 @@ public class ParameterExpression : Expression
 }
 ```
 
+## Visiting an Expression Tree
+
+```C#
+public abstract class ExpressionVisitor
+{
+   public virtual Expression Visit(Expression node) 
+   {
+      return node.Accept(this);
+   }
+
+   protected internal virtual Expression VisitLambda<T>(Expression<T> node)
+   {
+      Expression body = Visit(node.Body);
+
+      if (body != node.Body) 
+      {
+         return Expression.Lambda(node.Type, body, node.Parameters);
+      }
+      
+      return node;
+   }
+   //-----------------------------------V
+   protected internal virtual Expression VisitBinary(BinaryExpression node) 
+   {
+      return ValidateBinary(
+         node,
+         node.Update(        // creates a new expression that is like this node, but using its supplied children
+            Visit(node.Left),
+            VisitAndConvert(node.Conversion, nameof(VisitBinary)),
+            Visit(node.Right)
+         )
+      );
+   }
+
+   private static BinaryExpression ValidateBinary(BinaryExpression before, BinaryExpression after)
+   {
+      if (before != after && before.Method == null)
+      {
+         if (after.Method != null)
+         {
+            throw Error.MustRewriteWithoutMethod(after.Method, nameof(VisitBinary));
+         }
+ 
+         ValidateChildType(before.Left.Type, after.Left.Type, nameof(VisitBinary));
+         ValidateChildType(before.Right.Type, after.Right.Type, nameof(VisitBinary));
+      } 
+      return after;
+   }
+   //-----------------------------------Ʌ
+   
+   // leaf nodes do not require another instance of Visit or code to check whether an internal node has been changed
+   protected internal virtual Expression VisitConstant(ConstantExpression node)  // VisitParameter(ParameterExpression node)
+   {
+      return node;
+   }
+
+   protected internal virtual Expression VisitConditional(ConditionalExpression node);
+   // ...
+}
+```
+
+A quick recap on Visitor Pattern:
+
+```C#
+public abstract class Fruit { }
+public class Orange : Fruit { }
+public class Apple : Fruit { }
+public class Banana : Fruit { }
+
+var fruits = new Fruit[] { new Orange(), new Apple(), new Banana(), new Banana(), new Banana(), new Orange() };
+
+List<Orange> oranges = new List<Orange>();
+List<Apple> apples = new List<Apple>();
+List<Banana> bananas = new List<Banana>();
+
+foreach (Fruit fruit in fruits)
+{
+    if (fruit is Orange)
+        oranges.Add((Orange)fruit);
+    else if (fruit is Apple)
+        apples.Add((Apple)fruit);
+    else if (fruit is Banana)
+        bananas.Add((Banana)fruit);
+}
+
+/* some problems
+1. not an elegant approach
+2. not type-safe, we won't catch type errors until runtime
+3. not maintainable, if add a new Fruit type, need to search every place that perform type-test , very easy to miss without assistance of the compiler
+*/
+```
+
+Vistor Pattern approach:
+
+```C#
+interface IFruitVisitor
+{
+   void Visit(Orange fruit);
+   void Visit(Apple fruit);
+   void Visit(Banana fruit);
+}
+
+public abstract class Fruit { public abstract void Accept(IFruitVisitor visitor); }
+public class Orange : Fruit { public override void Accept(IFruitVisitor visitor) { visitor.Visit(this); } }
+public class Apple : Fruit { public override void Accept(IFruitVisitor visitor) { visitor.Visit(this); } }
+public class Banana : Fruit { public override void Accept(IFruitVisitor visitor) { visitor.Visit(this); } }
+
+class FruitPartitioner : IFruitVisitor
+{
+    public List<Orange> Oranges { get; private set; }
+    public List<Apple> Apples { get; private set; }
+    public List<Banana> Bananas { get; private set; }
+
+    public FruitPartitioner()
+    {
+        Oranges = new List<Orange>();
+        Apples = new List<Apple>();
+        Bananas = new List<Banana>();
+    }
+
+    public void Visit(Orange fruit) { Oranges.Add(fruit); }
+    public void Visit(Apple fruit) { Apples.Add(fruit); }
+    public void Visit(Banana fruit) { Bananas.Add(fruit); }
+}
+
+FruitPartitioner partitioner = new FruitPartitioner();
+
+foreach (Fruit fruit in fruits)
+{
+    fruit.Accept(partitioner);
+}
+```
+
+
+
+
+
+
+
 
 
 ???
 `Expression<Func<double, double, double>> TriangleAreaExp = (b, h) => b * h / 2;` TriangleAreaExp is not a delegate; instead, it is a reference to the root node of an expression tree.
 ???
+
+IsLifted?
