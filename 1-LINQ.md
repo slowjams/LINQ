@@ -966,6 +966,9 @@ public sealed class Expression<TDelegate> : LambdaExpression
    public TDelegate Compile();
    public TDelegate Compile(bool preferInterpretation);
    public TDelegate Compile(DebugInfoGenerator debugInfoGenerator);
+
+   internal sealed override Type TypeCore => typeof(TDelegate);
+
    public Expression<TDelegate> Update(Expression body, IEnumerable<ParameterExpression> parameters);
    protected internal override Expression Accept(ExpressionVisitor visitor);
 }
@@ -981,7 +984,9 @@ public abstract class LambdaExpression : Expression
    public Type ReturnType { get; }
    public bool TailCall { get; }
    public string Name { get; }
-   public sealed override Type Type { get; }
+
+   public sealed override Type Type => TypeCore;
+   internal abstract Type TypeCore { get; }       // Expression<TDelegate> will override it, which explains how InvocationExpression works, see a concrete example in later section
 
    public Delegate Compile();
    public Delegate Compile(bool preferInterpretation);
@@ -1000,10 +1005,8 @@ public abstract class Expression
    protected Expression();
    protected Expression(ExpressionType nodeType, Type type);
 
-   //------------------------------------V
    public virtual ExpressionType NodeType { get; }
    public virtual Type Type { get; }
-   //------------------------------------Ʌ
 
    public virtual bool CanReduce { get; }
 
@@ -1016,7 +1019,7 @@ public abstract class Expression
    {
       method = BinaryCoreCheck ("op_Addition", left, right, method);   // + operator gets compiled into a static method called op_Addition
 
-      return MakeSimpleBinary (ExpressionType.Add, left, right, method);
+      return ...;  // logic to make a new BinaryExpression instance
    }
 
    private static MethodInfo BinaryCoreCheck(string oper_name, Expression left, Expression right, MethodInfo method) 
@@ -1081,16 +1084,86 @@ public abstract class Expression
 		 return null;
 	}
 
+   public static Expression<TDelegate> Lambda<TDelegate>(Expression body, params ParameterExpression[] parameters);  // <------------
+  
    public static BinaryExpression And(Expression left, Expression right);  // AndAlso, AndAssign
+
    public static BinaryExpression Or(Expression left, Expression right);
+
    public static BinaryExpression Multiply(Expression left, Expression right);
-   public static BinaryExpression MakeBinary(ExpressionType binaryType, Expression left, Expression right);
-   // ...
+
+   // you might wonder why we need to use `method` here since we already have ExpressionType info which can be  ExpressionType.Add (+) e.g
+   // the reason we pass method is, we can overload + operator for custom class `public class Foo { public static Foo operator +(Foo x, Foo y) => new Foo(); }`
+   public static BinaryExpression MakeBinary(ExpressionType binaryType, Expression left, Expression right, bool liftToNull, MethodInfo method);  // <---------------
+   
    public static IndexExpression ArrayAccess(Expression array, IEnumerable<Expression> indexes);
+
    public static ConditionalExpression Condition(Expression test, Expression ifTrue, Expression ifFalse);
+
    public static MethodCallExpression Call(MethodInfo method, params Expression[] arguments);
+
    public static MethodCallExpression ArrayIndex(Expression array, IEnumerable<Expression> indexes);
-   public static InvocationExpression Invoke(Expression expression, IEnumerable<Expression> arguments);
+
+   //-----------V
+   public static InvocationExpression Invoke(Expression expression, IEnumerable<Expression> arguments)   // see an example in later section
+   {   
+      IReadOnlyList<Expression> argumentList = arguments.ToReadOnly();
+      switch (argumentList.Count) {
+         case 0:
+            return Invoke(expression);
+         case 1:
+            return Invoke(expression, argumentList[0]);
+         case 2:
+            return Invoke(expression, argumentList[0], argumentList[1]);
+         // ...
+         case 5:
+            return Invoke(expression, argumentList[0], argumentList[1], argumentList[2], argumentList[3], argumentList[4]);
+      }
+      // ...
+   }  
+
+   internal static InvocationExpression Invoke(Expression expression, Expression arg0, Expression arg1)
+   {
+      MethodInfo method = GetInvokeMethod(expression);
+      // ...
+      arg0 = ValidateOneArgument(method, ExpressionType.Invoke, arg0, pis[0], nameof(expression), nameof(arg0));  // just do some validation, not modify/reassign arg0
+      arg1 = ValidateOneArgument(method, ExpressionType.Invoke, arg1, pis[1], nameof(expression), nameof(arg1));
+
+      return new InvocationExpression2(expression, method.ReturnType, arg0, arg1);
+   }
+
+   internal static MethodInfo GetInvokeMethod(Expression expression)  // gets the delegate's Invoke method; used by InvocationExpression
+   {
+       Type delegateType = expression.Type;
+       // ...
+       return delegateType.GetInvokeMethod();
+   }
+
+   internal sealed class InvocationExpression2 : InvocationExpression
+   {
+      private object _arg0;  // storage for the 1st argument or a read-only collection
+      private readonly Expression _arg1;  // storage for the 2nd argument
+
+      public InvocationExpression2(Expression lambda, Type returnType, Expression arg0, Expression arg1) : base(lambda, returnType)
+      {
+         _arg0 = arg0;
+         _arg1 = arg1;
+      }
+
+      public override Expression GetArgument(int index) 
+      {
+         switch (index) {
+            case 0:
+               return ExpressionUtils.ReturnObject<Expression>(_arg0);
+            case 1:
+               return  _arg1;
+            case _:
+               throw new ArgumentOutOfRangeException(nameof(index));          
+         }
+      }
+      // ...
+   }
+   //-----------Ʌ
    public static ConstantExpression Constant(object value);
    // ...
 
@@ -1130,7 +1203,7 @@ public class BinaryExpression : Expression
    public sealed override ExpressionType NodeType { get; }  // can be a lot of different ExpressionType such as Add, Divide
 
    public LambdaExpression Conversion => GetConversion();
-   internal virtual LambdaExpression? GetConversion() => null;
+   internal virtual LambdaExpression GetConversion() => null;
 
    public bool IsLifted { get; }
    public bool IsLiftedToNull { get; }
@@ -1182,16 +1255,65 @@ public class MethodCallExpression : Expression, IArgumentProvider
    }
 }
 
+// InvocationExpression lets you provides arguments to another Expression which has its own arguments, which create a parameter mapping, you will see a concrete example
 public sealed class InvocationExpression : Expression, IArgumentProvider
 {
-   public ReadOnlyCollection<Expression> Arguments { get; }
+   internal InvocationExpression(Expression expression, Type returnType) 
+   {
+      Expression = expression;
+      Type = returnType;
+   }
+   
    public Expression Expression { get; }
+
+   public ReadOnlyCollection<Expression> Arguments => GetOrMakeArguments();
+
+   internal virtual ReadOnlyCollection<Expression> GetOrMakeArguments()   // for subclass such as InvocationExpression2 to override
+   {
+      throw ContractUtils.Unreachable;
+   }
+
+   public virtual Expression GetArgument(int index)
+   {
+      throw ContractUtils.Unreachable;
+   }
    
    public sealed override ExpressionType NodeType { get; }
+
    public sealed override Type Type { get; }
 
    public InvocationExpression Update(Expression expression, IEnumerable<Expression> arguments);
 }
+
+//-------------V
+internal sealed class InvocationExpression2 : InvocationExpression
+{
+   private object _arg0;  // storage for the 1st argument or a read-only collection
+   private readonly Expression _arg1;  // storage for the 2nd argument
+
+   public InvocationExpression2(Expression lambda, Type returnType, Expression arg0, Expression arg1) : base(lambda, returnType)
+   {
+      _arg0 = arg0;
+      _arg1 = arg1;
+   }
+
+   internal override ReadOnlyCollection<Expression> GetOrMakeArguments();
+
+   public override Expression GetArgument(int index) 
+   {
+      switch (index) {
+         case 0:
+            return ExpressionUtils.ReturnObject<Expression>(_arg0);
+         case 1:
+            return  _arg1;
+         case _:
+            throw new ArgumentOutOfRangeException(nameof(index));           
+      }
+   }
+   // ...
+
+}
+//-------------Ʌ
 
 public class ConditionalExpression : Expression 
 {
@@ -1216,6 +1338,39 @@ public class ParameterExpression : Expression
 }
 ```
 
+You might wonder why `MethodCallExpression` and `InvocationExpression` Arguments are `ReadOnlyCollection<Expression>` not `ReadOnlyCollection<ExpParameterExpressionression>` just as `LambdaExpression`'s Parameters:
+
+```C#
+public abstract class LambdaExpression : Expression
+{
+   public Expression Body { get; }
+   public ReadOnlyCollection<ParameterExpression> Parameters { get; }
+   // ...
+}
+
+public class MethodCallExpression : Expression, IArgumentProvider 
+{
+   public Expression Object { get; }
+   public ReadOnlyCollection<Expression> Arguments { get; }
+   // ...
+}
+
+public sealed class InvocationExpression : Expression, IArgumentProvider
+{
+   public Expression Expression { get; }
+   public ReadOnlyCollection<Expression> Arguments { get; }
+}
+```
+
+The reason is , if you make `MethodCallExpression`'s Arguments to be `ReadOnlyCollection<ExpParameterExpressionression>`:
+
+```C#
+Expression<Action<string>> expr = p => Console.WriteLine(p);  // OK
+
+Expression<Action<string>> expr = p => Console.WriteLine("Hello " + p);  // doesn't work, because `"Hello " + p` forms a `BinaryExpression`
+```
+
+
 ## Visiting an Expression Tree
 
 ```C#
@@ -1234,7 +1389,7 @@ public abstract class ExpressionVisitor
       {
          return Expression.Lambda(node.Type, body, node.Parameters);
       }
-      
+
       return node;
    }
    //-----------------------------------V
@@ -1242,8 +1397,8 @@ public abstract class ExpressionVisitor
    {
       return ValidateBinary(
          node,
-         node.Update(        // creates a new expression that is like this node, but using its supplied children
-            Visit(node.Left),
+         node.Update(        
+            Visit(node.Left),  // call Left node and right node recursively, this is important as it really visits all nodes thoroughly
             VisitAndConvert(node.Conversion, nameof(VisitBinary)),
             Visit(node.Right)
          )
@@ -1266,8 +1421,26 @@ public abstract class ExpressionVisitor
    }
    //-----------------------------------Ʌ
    
+   protected internal virtual Expression VisitInvocation(InvocationExpression node)
+   {
+      Expression e = Visit(node.Expression);
+      Expression[]? a = VisitArguments(node);
+      if (e == node.Expression && a == null)
+      {
+         return node;
+      }
+
+      return node.Rewrite(e, a);  // this call throws an Unreachable exception, the reason to put it here is to make the code compile, it will never be called in reality
+                                  // because if the node is same as before, it return in the if statment, if the node is modified
+   }
+
    // leaf nodes do not require another instance of Visit or code to check whether an internal node has been changed
-   protected internal virtual Expression VisitConstant(ConstantExpression node)  // VisitParameter(ParameterExpression node)
+   protected internal virtual Expression VisitConstant(ConstantExpression node) 
+   {
+      return node;
+   }
+
+   protected internal virtual Expression VisitParameter(ParameterExpression node)
    {
       return node;
    }
@@ -1350,7 +1523,329 @@ foreach (Fruit fruit in fruits)
 ```
 
 
+#### Dissecting Expression Trees
 
+```C#
+Expression<Func<int, int>> lambdaInc = (n) => n + 1;
+
+Func<int, int> lambda = lambdaInc.Compile();   // calling Compile() generates the Intermediate Language (IL) code to implement the behavior described by the visiting nodes
+                                               // Visiting nodes using `ExpressionVisitor` will be covered in the next section
+int num = lambda(3);
+
+int  num = lambdaInc.Compile()(3);
+```
+
+![alt text](./zImages/1.png "expression tree for (n) => n + 1")
+
+Let's first see how compiler Generates an Expression Tree for you. When you use `Expression<Func<int, int>> lambdaInc = (n) => n + 1`, compiler does the following equivalent:
+
+```C#
+ConstantExpression constant = Expression.Constant(1, typeof(int));
+ParameterExpression parameter = Expression.Parameter(typeof(int), "n");
+BinaryExpression addBinaryExpression = Expression.Add( parameter, constant );
+
+Expression<Func<int, int>> exprInc = Expression.Lambda<Func<int, int>>(addBinaryExpression, new ParameterExpression[] { parameter } );
+```
+
+`exprInc` points to the `LambdaExpression` node, to create a non-LambdaExpression node, you need to use Expression's static methods API such as `Add()`, `MakeBinary()` etc.
+
+You can't assign a already-defined delegate to `Expression<T>` as:
+
+```C#
+Expression<Action<string>> exp = p => Console.WriteLine(p);  // OK
+
+Action<string> action = p => Console.WriteLine(p);
+Expression<Action<string>> exp = action;   // doesn't compile, cannot implicitly convert Action<String> to Expression<Action<string>>
+```
+
+Note that the nodes of an expression tree are immutable, as `Expression`'s properties are read-only ( e.g `public Expression Left { get; }`, no setter), let's say you want to change the constant 1 to 10 in the (n) => n + 1 example above:
+
+```C#
+Expression<int, int> lambdaInc = (n) => n + 1;
+
+// wrong approach
+Expression body = lambdaInc.Body;
+ConstantExpression constant = top.Right() as ConstantExpression;
+constant.Value = 5;  // compiler error - Value is a read-only property
+
+// correct approach
+Expression body = lambdaInc.Body;
+ConstantExpression newRight = Expression.Constant(10);
+Expression newTree = Expression.MakeBinary(body.NodeType, body.Left, newRight);
+```
+
+
+#### Modifying Expression Trees using `ExpressionVisitor`
+
+In this section, we'll be looking into 3 examples (starting from easy to difficult levels ) to gain a better understanding on `ExpressionVisitor`
+
+**Example One**
+
+Let's say you want to change the logic `&&` to `||` as:
+
+```C#
+// before
+Func<string, bool> expr = name => name.Length > 10 && name.StartsWith("G");
+
+//after
+Func<string, bool> expr = name => name.Length > 10 || name.StartsWith("G");
+```
+
+Solution:
+
+```C#
+public class AndAlsoModifier : ExpressionVisitor
+{
+   public Expression Modify(Expression expression) 
+   {
+      return Visit(expression);   // <-------------------------1.1, expression here is LambdaExpression        
+   }
+
+   protected override Expression VisitBinary(BinaryExpression b) // <---------------2.2a 
+   {
+      if (b.NodeType == ExpressionType.AndAlso)
+      {
+          Expression left = this.Visit(b.Left);   // // call Visit() on its left and right nodes recursively
+          Expression right = this.Visit(b.Right); 
+
+           return Expression.MakeBinary(ExpressionType.OrElse, left, right, b.IsLiftedToNull, b.Method);
+      }
+
+      return base.VisitBinary(b);  // let you visit all the nodes thoroughly, there could be another "AndAlso" binary exp in a deep nested level if we make our exapmle complicated
+                                   // if you don't call base method, you will end up with only changes the first "AndAlso" binary exp visited, and missing other potential nodes
+   }
+}
+
+Expression<Func<string, bool>> expr = name => name.Length > 10 && name.StartsWith("G");  
+Console.WriteLine(expr);  
+
+AndAlsoModifier treeModifier = new AndAlsoModifier();  
+Expression modifiedExpr = treeModifier.Modify((Expression) expr);   // <---------------1
+
+Console.WriteLine(modifiedExpr);  
+
+/* 
+    name => ((name.Length > 10) && name.StartsWith("G"))  
+    name => ((name.Length > 10) || name.StartsWith("G"))  
+*/  
+```
+
+Let's analyse the code with `ExpressionVisitor`:
+
+```C#
+public abstract class ExpressionVisitor
+{
+   public virtual Expression Visit(Expression node) 
+   {
+      return node.Accept(this);   // <-------------------------1.2a; 2.1a
+   }
+
+   protected internal virtual Expression VisitLambda<T>(Expression<T> node)
+   {
+      Expression body = Visit(node.Body);   // <--------------1.3_   node.Body is BinaryExpression that represent name => ((name.Length > 10) && name.StartsWith("G"))
+
+      if (body != node.Body)
+      {
+         return Expression.Lambda(node.Type, body, node.Parameters);
+      }
+
+      return node;
+   }
+
+   protected internal virtual Expression VisitBinary(BinaryExpression node)  // is override by AndAlsoModifier, but will still be called conditionally
+   {
+      return ValidateBinary(    
+         node,
+         node.Update(         
+            Visit(node.Left), 
+            VisitAndConvert(node.Conversion, nameof(VisitBinary)),
+            Visit(node.Right)
+         )
+      );
+   }
+
+   // this method is not very important, just do some validation check and return the modified node
+   private static BinaryExpression ValidateBinary(BinaryExpression before, BinaryExpression after)
+   {
+      if (before != after && before.Method == null)
+      {
+         if (after.Method != null)
+         {
+            throw Error.MustRewriteWithoutMethod(after.Method, nameof(VisitBinary));
+         }
+ 
+         ValidateChildType(before.Left.Type, after.Left.Type, nameof(VisitBinary));
+         ValidateChildType(before.Right.Type, after.Right.Type, nameof(VisitBinary));
+      } 
+      return after;
+   }
+   // ...
+}
+
+public abstract class LambdaExpression : Expression
+{
+   public Expression Body { get; }
+   public ReadOnlyCollection<ParameterExpression> Parameters { get; }
+
+   protected internal override Expression Accept(ExpressionVisitor visitor)  // <------------1.2b
+   {
+      return visitor.VisitLambda(this);   
+   }
+   // ...
+}
+
+public class BinaryExpression : Expression
+{
+   // ...
+   protected internal override Expression Accept(ExpressionVisitor visitor)  // <---------------2.1b
+   {
+      return visitor.VisitBinary(this);
+   }
+
+   public BinaryExpression Update(Expression left, LambdaExpression conversion, Expression right)  // <---------------2.2b, return original node or construct a new node
+   {
+      if (left == Left && right == Right && conversion == Conversion)
+      {
+         return this;
+      }
+
+      if (IsReferenceComparison) 
+      {
+         if (NodeType == ExpressionType.Equal)
+         {
+            return Expression.ReferenceEqual(left, right);
+         }
+         else
+         {
+            return Expression.ReferenceNotEqual(left, right);
+         }
+      }
+
+      return Expression.MakeBinary(NodeType, left, right, IsLiftedToNull, Method, conversion);
+   }
+}
+```
+
+**Example Two**
+
+Let's say you want to use existing expression tree `rectArea` in a new expression:
+
+```C#
+Expression<Func<double, double, double>> rectArea = (b, h) => b * h;   // b, h parameter names are chosen (not x, y as usual) with purpose as you will see 
+```
+![alt text](./zImages/2.png "area tree")
+
+and you want to calculate volumn, you could do:
+
+```C#
+Expression<Func<double, double, double, double >> volume = (x, y, z) => x * y * z;
+```
+
+and you want to use `rectArea` with volume somehow as:
+
+```C#
+Expression<Func<double, double, double, double >> volume = (x, y, z) => rectArea(x, y) * z;  // doesn't compile, of course
+
+Expression<Func<double, double, double, double >> volume = (x, y, z) => rectArea.Compile()(x, y) * z;  // compile, but have an extra InvocationExpression node as below picture: 
+```
+![alt text](./zImages/3.png "extra InvocationExpression in expression tree")
+
+which is not what we really want, what we want is:
+
+![alt text](./zImages/4.png "expression tree as volume")
+
+
+So how can we remove the `InvocationExpression` node? It will be very difficulty to remove this node since expression trees are immutable, which means you need to manullay create new expression, which is tedious and error-prone, there is a better way to do it with `ExpressionVisitor`:
+
+Firstly, let's start with the exising `rectArea` and build the expression tree that has extra `InvocationExpression` node:
+
+```C#
+Expression<Func<double, double, double>> rectArea = (b, h) => b * h;
+
+ParameterExpression x = Expression.Parameter(typeof(double), "x" );
+ParameterExpression y = Expression.Parameter(typeof(double), "y");
+ParameterExpression z = Expression.Parameter(typeof(double), "z");
+Expression area = Expression.Invoke(rectArea, new Expression[] { x, y });
+
+BinaryExpression multiply = Expression.Multiply(z, area);
+Expression<Func<double, double, double, double>> volume = Expression.Lambda<Func<double, double, double, double>>(multiply, new ParameterExpression[] { x, y, z });
+
+Console.WriteLine("Area   = {0}", rectArea.ToString());
+Console.WriteLine("Volume = {0}", volume.ToString());
+Console.WriteLine("Area value   = {0}", rectArea.Compile()(20, 10));
+Console.WriteLine("Volume value = {0}", volume.Compile()(20, 10, 8));
+
+/*
+Area   = (b, h) => (b * h)
+Volume = (x, y, z) => (z * Invoke((b, h) => (b * h),x,y))   // (b, h) => (b * h) is an Expression, so it's like Invoke(ContainningExpression,x,y)
+Area value   = 200
+Volume value = 1600
+*/
+```
+
+The second step is to obtain the expression tree which is what we want without the extra `InvocationExpression` node by using `ExpressionVisitor`:
+
+```C#
+public class RemoveInvokeVisitor<T> : ExpressionVistor
+{
+   protected override Expression VisitInvocation(InvocationExpression invocExpr) {
+      ReadOnlyCollection<Expression> newParams = invocExpr.Arguments;   // newParams is ParameterExpression x, y, z
+      LambdaExpression lambda = invocExpr.Expression as LambdaExpression;
+      if (lambda != null)
+      {
+         ReadOnlyCollection<ParameterExpression> oldParams = lambda.Parameters;
+         ReplaceParametersVisitor replace = new ReplaceParametersVisitor(oldPars, newPars);
+
+         // the design of this return is very important, it is not like traditional pattern that VisitXXX and return XXX expression, 
+         // now it is like VisitXXX (XXX is InvocationExpression) and return YYY (YYY is BinaryExpression)
+         return replace.ReplaceVisit(lambda.Body);  // returns a newBinaryExpression, not a new InvocationExpression, which is our purpose to "remove" invocation
+                                                    // lambda.Body is old BinaryExpression (b*h), newBinaryExpression is (x *y)
+      }
+   }
+}
+
+public class ReplaceParametersVisitor : ExpressionVistor
+{
+   private ReadOnlyCollection<Expression> newParameters;
+   private ReadOnlyCollection<ParameterExpression> oldParameters;
+
+   public ReplaceParametersVisitor(ReadOnlyCollection<ParameterExpression> oldParameters, ReadOnlyCollection<Expression> newParameters)
+   {
+      this.newParameters = newParameters;
+      this.oldParameters = oldParameters;
+   }
+
+   protected override Expression VisitParameter(ParameterExpression p)
+   {
+      if (oldParameters != null && newParameters != null)
+      {
+         if (oldParameters.Contains(p))
+         {
+            return newParameters[oldParameters.IndexOf(p)];
+         }
+      }
+
+      return base.VisitParameter(p);
+   }
+
+   // only visits child/grandchild nodes (BinaryExpression b*h in this example) of InvocationExpression exp
+   public Expression ReplaceVisit(Expression exp)  // exp is BinaryExpression (b*h)
+   {
+      return Visit(exp);   // returns a new BinaryExpression if we find what we want to remove/modify
+   }
+}
+
+// note that even this visitor is called ReplaceParametersVisitor, part of its job is to return new BinaryExpression from its ReplaceVisit method
+```
+
+
+
+
+
+
+-To Do:  if you use  `Expression<T>` to constructor an expression, the expression is a lambada expression whose body wrapper the concrete expression, and when you use Expression's Static method to create expression, then there is no lambda expression reference
+
+-To Do: how InvocationExpression can contains lambda expression or a concrete expression by using TypeCore
 
 
 
@@ -1362,3 +1857,5 @@ foreach (Fruit fruit in fruits)
 ???
 
 IsLifted?
+
+![alt text](./zImages/21-1.png "Title")
