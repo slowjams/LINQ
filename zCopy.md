@@ -1004,7 +1004,7 @@ public abstract class Expression
    protected Expression(ExpressionType nodeType, Type type);
 
    public virtual ExpressionType NodeType { get; }
-   public virtual Type Type { get; }   // check if it is sth legacy (don't need to understand the details), the take away is, it relys on Expression<TDelegate> to override Type
+   public virtual Type Type { get; }
 
    public virtual bool CanReduce { get; }
 
@@ -1117,6 +1117,7 @@ public abstract class Expression
    {
       LambdaExpression lambda = expression as LambdaExpression;
 
+      // lambda.PublicType is important here, which explains why we can't use ConstantExpression instead of UnaryExpression
       return new UnaryExpression(ExpressionType.Quote, lambda, lambda.PublicType, null);
    }
 
@@ -1881,7 +1882,7 @@ Expression<Func<double, double, double, double>> cleanVolume = cleaner.RemoveInv
 ```
 
 
-**Example Three: Dynamic Composition of an Expression Tree**
+**Example Three**
 
 This is the most important part in regards to create an Expression Tree dynamically. . For example, an user makes some choices through the user interface to filter data to
 be queried. You might think we can use LINQ's `Where` to do the job without Expression Tree, the problem is that a class can have a lot of properties, each properties might be non-primitive type, so are you going to write endless `Where` to do the job? That's why Expression Tree kicks in, let's see an concrete example, let's say you want to query ` System.Diagnostic.Process` so you can do `p => (p.Responding == True) && (p.BasePriority > 8)`:
@@ -2035,7 +2036,7 @@ public abstract class EnumerableQuery
    }
 }
 
-public class EnumerableQuery<T> : EnumerableQuery, IOrderedQueryable<T>, IQueryProvider  // IOrderedQueryable<T> inherits IQueryable<T> and IQueryable
+public class EnumerableQuery<T> : EnumerableQuery, IOrderedQueryable<T>, IQueryProvider
 {
    private readonly Expression _expression;
    private IEnumerable<T> _enumerable;
@@ -2169,7 +2170,6 @@ public static class Queryable
 ## A LINQ to SQL Provider
 
 ```C#
-//---------------------------------V
 public abstract class QueryProvider : IQueryProvider
 {
    protected QueryProvider() { }
@@ -2207,8 +2207,7 @@ public abstract class QueryProvider : IQueryProvider
 
    public abstract object Execute(Expression expression);
 }
-//---------------------------------Ʌ
-//--------------------------VV
+
 public class DbQueryProvider : QueryProvider
 {
    private readonly DbConnection connection;
@@ -2242,9 +2241,7 @@ public class DbQueryProvider : QueryProvider
       return new QueryTranslator().Translate(expression);
    }
 }
-//--------------------------ɅɅ
 
-//----------------------------V
 internal class ObjectReader<T> : IEnumerable<T> where T : class, new()
 {
    Enumerator enumerator;
@@ -2369,9 +2366,7 @@ internal class ObjectReader<T> : IEnumerable<T> where T : class, new()
       }
    }
 }
-//----------------------------Ʌ
 
-//-------------------V
 public class Query<T> : IQueryable<T>
 {
    private QueryProvider provider;
@@ -2431,9 +2426,58 @@ public class Query<T> : IQueryable<T>
       return this.provider.GetQueryText(this.expression);
    }
 }
-//-------------------Ʌ
 
-//----------------------------V
+internal static class TypeSystem
+{
+   internal static Type GetElementType(Type seqType)
+   {
+      Type ienum = FindIEnumerable(seqType);
+      if (ienum == null)
+         return seqType;
+
+      return ienum.GetGenericArguments()[0];
+   }
+
+   private static Type FindIEnumerable(Type seqType)
+   {
+      if (seqType == null || seqType == typeof(string))
+         return null;
+
+      if (seqType.IsArray)
+         return typeof(IEnumerable<>).MakeGenericType(seqType.GetElementType());
+
+      if (seqType.IsGenericType)
+      {
+         foreach (Type arg in seqType.GetGenericArguments())
+         {
+            Type ienum = typeof(IEnumerable<>).MakeGenericType(arg);
+            if (ienum.IsAssignableFrom(seqType))
+               return ienum;
+         }
+      }
+
+      Type[] ifaces = seqType.GetInterfaces();
+
+      if (ifaces != null && ifaces.Length > 0)
+      {
+         foreach (Type iface in ifaces)
+         {
+            Type ienum = FindIEnumerable(iface);
+
+            if (ienum != null)
+               return ienum;
+         }
+      }
+
+      if (seqType.BaseType != null && seqType.BaseType != typeof(object))
+      {
+         return FindIEnumerable(seqType.BaseType);
+      }
+
+      return null;
+   }
+}
+
 internal class QueryTranslator : ExpressionVisitor
 {
     StringBuilder sb;
@@ -2592,60 +2636,6 @@ internal class QueryTranslator : ExpressionVisitor
         throw new NotSupportedException(string.Format("The member '{0}' is not supported", m.Member.Name));
     }
 }
-//----------------------------Ʌ
-
-//-------------------V
-internal static class TypeSystem
-{
-   internal static Type GetElementType(Type seqType)
-   {
-      Type ienum = FindIEnumerable(seqType);
-      if (ienum == null)
-         return seqType;
-
-      return ienum.GetGenericArguments()[0];
-   }
-
-   private static Type FindIEnumerable(Type seqType)
-   {
-      if (seqType == null || seqType == typeof(string))
-         return null;
-
-      if (seqType.IsArray)
-         return typeof(IEnumerable<>).MakeGenericType(seqType.GetElementType());
-
-      if (seqType.IsGenericType)
-      {
-         foreach (Type arg in seqType.GetGenericArguments())
-         {
-            Type ienum = typeof(IEnumerable<>).MakeGenericType(arg);
-            if (ienum.IsAssignableFrom(seqType))
-               return ienum;
-         }
-      }
-
-      Type[] ifaces = seqType.GetInterfaces();
-
-      if (ifaces != null && ifaces.Length > 0)
-      {
-         foreach (Type iface in ifaces)
-         {
-            Type ienum = FindIEnumerable(iface);
-
-            if (ienum != null)
-               return ienum;
-         }
-      }
-
-      if (seqType.BaseType != null && seqType.BaseType != typeof(object))
-      {
-         return FindIEnumerable(seqType.BaseType);
-      }
-
-      return null;
-   }
-}
-//-------------------Ʌ
 
 public class Customers
 {
@@ -2704,9 +2694,6 @@ static void Main(string[] args)
 
 
 ##  
-
-Note that XXExpression e.g BinaryExpression has many subtype, when you call Expression static api, most of time it doesn't create a baseclass BinaryExpression instance directly, intead, it create subtype instance
-
 
 
 ```C#
@@ -2784,21 +2771,7 @@ var f3b = f3a(300).Compile();   // throws exception at Compile(): variable s of 
 ![alt text](./zImages/6.png "ConstantExpression doesn't have ParameterExpression")
 
 
-
-
-
-Unlike a Constant node, the Quote node specially handles contained `ParameterExpression` nodes.  At run time when the Quote node is evaluated, it substitutes the
-closure variable references for the `ParameterExpression` reference nodes, and then returns the quoted expression. Let's look at some examples:
-
-```C#
-// to implement: x => x + 1
-ConstantExpression constant = Expression.Constant(1, typeof(int));
-ParameterExpression parameter = Expression.Parameter(typeof(int), "x");
-
-Expression<Func<int, int>> f = Expression.Lambda<Func<int, int>>(Expression.Add(parameter, constant), new ParameterExpression[] { parameter });
-
-Console.WriteLine(f);   // x => x + 1
-```
+Another example on `Expression.Quote()`:
 
 ```C#
 // to implement: x => y => (x + y)
@@ -2806,23 +2779,8 @@ ParameterExpression x = Expression.Parameter(typeof(int), "x");
 ParameterExpression y = Expression.Parameter(typeof(int), "y");
 
 Expression<Func<int, Expression>> f = Expression.Lambda<Func<int, Expression>>(
-                                         Expression.Quote(  Expression.Lambda<Func<int, int>>(Expression.Add(x, y), new ParameterExpression[] { y })  ),
-                                      new ParameterExpression[] { x });
+                                         Expression.Quote(  Expression.Lambda<Func<int, int>>(Expression.Add(x, y), y)  ),
+                                                                               x);
 
-Console.WriteLine(f);   // x => y => (x + y)
-```
-
-You can see that `Expression.Quote()` "pass" the outter lambda's x into inner lambda's x. Also compare `Expression<Func<int, int>> f` in first example and `Expression<Func<int, Expression>> f` in the second example, `Expression.Quote()` somehow force you call `Compile()` twice and plus one explicit casting e.g `((Expression<Func<int, int>>)f.Compile()(3)).Compile()(5)`
-
-If you don't want to use `Expression.Quote()`, you can do:
-
-```C#
-ParameterExpression x = Expression.Parameter(typeof(int), "x");
-ParameterExpression y = Expression.Parameter(typeof(int), "y");
-
-Expression<Func<int, Func<int, int>>> f = Expression.Lambda<Func<int, Func<int, int>>>(
-                                             Expression.Lambda<Func<int, int>>(Expression.Add(x, y), new ParameterExpression[] { y }),
-                                          new ParameterExpression[] { x });
-
-Console.WriteLine(f);   // x => y => (x + y)
+Console.WriteLine(f);   //  x => y => (x + y)
 ```
