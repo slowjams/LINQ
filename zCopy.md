@@ -1004,7 +1004,7 @@ public abstract class Expression
    protected Expression(ExpressionType nodeType, Type type);
 
    public virtual ExpressionType NodeType { get; }
-   public virtual Type Type { get; }
+   public virtual Type Type { get; }   // check if it is sth legacy (don't need to understand the details), the take away is, it relys on Expression<TDelegate> to override Type
 
    public virtual bool CanReduce { get; }
 
@@ -1117,7 +1117,6 @@ public abstract class Expression
    {
       LambdaExpression lambda = expression as LambdaExpression;
 
-      // lambda.PublicType is important here, which explains why we can't use ConstantExpression instead of UnaryExpression
       return new UnaryExpression(ExpressionType.Quote, lambda, lambda.PublicType, null);
    }
 
@@ -1479,6 +1478,8 @@ public abstract class ExpressionVisitor
    // ...
 }
 ```
+
+Note that XXExpression e.g `BinaryExpression` has many subtype, when you call Expression static api, most of time it doesn't create a baseclass of `XXXExpression` instance directly, intead, it create subtype instance such as `SimpleBinaryExpression`, `MethodCallExpression2`, `MethodCallExpression3` etc
 
 A quick recap on Visitor Pattern:
 
@@ -1882,7 +1883,7 @@ Expression<Func<double, double, double, double>> cleanVolume = cleaner.RemoveInv
 ```
 
 
-**Example Three**
+**Example Three: Dynamic Composition of an Expression Tree**
 
 This is the most important part in regards to create an Expression Tree dynamically. . For example, an user makes some choices through the user interface to filter data to
 be queried. You might think we can use LINQ's `Where` to do the job without Expression Tree, the problem is that a class can have a lot of properties, each properties might be non-primitive type, so are you going to write endless `Where` to do the job? That's why Expression Tree kicks in, let's see an concrete example, let's say you want to query ` System.Diagnostic.Process` so you can do `p => (p.Responding == True) && (p.BasePriority > 8)`:
@@ -1945,28 +1946,31 @@ public class ProcessFilters
 ```
 
 ```C#
-ProcessFilters pf = new ProcessFilters();
-
-// depends on user selection, we can use Reflection to list all properties on GUI for users to choose and capture users' inputs
-pf.Add("Responding", ExpressionType.Equal, true);        // simulate users' selection
-pf.Add("BasePriority", ExpressionType.GreaterThan, 8);   // simulate users' selection
-
-Expression<Func<Process, bool>> filterExpression = pf.GetExpression();
-
-if (filterExpression == null)
+static void Main(string[] args)
 {
-   filterExpression = (p) => true;
+   ProcessFilters pf = new ProcessFilters();
+
+   // depends on user selection, we can use Reflection to list all properties on GUI for users to choose and capture users' inputs
+   pf.Add("Responding", ExpressionType.Equal, true);        // simulate users' selection
+   pf.Add("BasePriority", ExpressionType.GreaterThan, 8);   // simulate users' selection
+
+   Expression<Func<Process, bool>> filterExpression = pf.GetExpression();
+
+   if (filterExpression == null)
+   {
+      filterExpression = (p) => true;
+   }
+
+   Console.WriteLine("Filter : {0}", filterExpression.ToString());
+
+   var query =
+      Process.GetProcesses().AsQueryable()
+      .Where(filterExpression)
+      .Select(p => p.ProcessName);
+
+   foreach (var row in query)
+      Console.WriteLine(row);
 }
-
-Console.WriteLine("Filter : {0}", filterExpression.ToString());
-
-var query =
-   Process.GetProcesses().AsQueryable()
-   .Where(filterExpression)
-   .Select(p => p.ProcessName);
-
-foreach (var row in query)
-   Console.WriteLine(row);
 
 /*
 Filter : p => ((p.Responding == True) AndAlso (p.BasePriority > 8)) 
@@ -1985,7 +1989,7 @@ services
 ![alt text](./zImages/5.png "expression tree for ProcessFilters")
 
 
-
+--------------------------------------------------------------------------
 ## Demystifying `IQueryable<T>`
 
 ```C#
@@ -2036,7 +2040,7 @@ public abstract class EnumerableQuery
    }
 }
 
-public class EnumerableQuery<T> : EnumerableQuery, IOrderedQueryable<T>, IQueryProvider
+public class EnumerableQuery<T> : EnumerableQuery, IOrderedQueryable<T>, IQueryProvider  // IOrderedQueryable<T> inherits IQueryable<T> and IQueryable
 {
    private readonly Expression _expression;
    private IEnumerable<T> _enumerable;
@@ -2167,15 +2171,140 @@ public static class Queryable
 ```
 
 
+## Use Expression.Quote() to Wrap LambdaExpression
+
+Difference between `UnaryExpression` and `ConstantExpression`:
+https://stackoverflow.com/questions/3138133/what-is-the-purpose-of-linqs-expression-quote-method
+https://stackoverflow.com/questions/3716492/what-does-expression-quote-do-that-expression-constant-can-t-already-do/3753382#3753382
+
+```C#
+/* nested lambda
+(int s) => (int t) => s+t  
+*/
+
+var ps = Expression.Parameter(typeof(int), "s");
+var pt = Expression.Parameter(typeof(int), "t");
+
+//
+var ex1 = Expression.Lambda(
+             Expression.Lambda(
+                Expression.Add(ps, pt),
+             pt),
+          ps);
+
+var f1a = (Func<int, Func<int, int>>)ex1.Compile();   // OK
+var f1b = f1a(100);
+Console.WriteLine(f1b(123));
+
+// now let's say we want to represent: (int s) => Expression.Lambda(Expression.Add(...
+var ex2 = Expression.Lambda(
+             Expression.Quote(   // <------------- have to use Expression.Quote
+                Expression.Lambda(
+                   Expression.Add(ps, pt),
+                pt)
+             ),
+          ps);
+
+var f2a = (Func<int, Expression<Func<int, int>>>)ex2.Compile();
+Func<int, int> f2b = f2a(200).Compile();   // OK
+Console.WriteLine(f2b(123));
+
+var ex3 = Expression.Lambda(
+             Expression.Constant(  // <------------- cannot use Expression.Constant
+                Expression.Lambda(
+                   Expression.Add(ps, pt),
+                pt)
+             ),
+          ps);
+
+var f3a = (Func<int, Expression<Func<int, int>>>)ex3.Compile();
+var f3b = f3a(300).Compile();   // throws exception at Compile(): variable s of type System.Int32 is not defined 
+// Console.WriteLine(f3b(123));   
+```
+
+Unlike a Constant node, the Quote node specially handles contained `ParameterExpression` nodes.  At run time when the Quote node is evaluated, it substitutes the
+closure variable references for the `ParameterExpression` reference nodes, and then returns the quoted expression. Let's look at some examples:
+
+```C#
+// to implement: x => x + 1
+ConstantExpression constant = Expression.Constant(1, typeof(int));
+ParameterExpression parameter = Expression.Parameter(typeof(int), "x");
+
+Expression<Func<int, int>> f = Expression.Lambda<Func<int, int>>(Expression.Add(parameter, constant), new ParameterExpression[] { parameter });
+
+Console.WriteLine(f);   // x => x + 1
+```
+
+```C#
+// to implement: x => y => (x + y)
+ParameterExpression x = Expression.Parameter(typeof(int), "x");
+ParameterExpression y = Expression.Parameter(typeof(int), "y");
+
+Expression<Func<int, Expression>> f = Expression.Lambda<Func<int, Expression>>(
+                                         Expression.Quote(  Expression.Lambda<Func<int, int>>(Expression.Add(x, y), new ParameterExpression[] { y })  ),
+                                      new ParameterExpression[] { x });
+
+Console.WriteLine(f);   // x => y => (x + y)
+```
+
+You can see that `Expression.Quote()` "pass" the outter lambda's x into inner lambda's x. Also compare `Expression<Func<int, int>> f` in first example and `Expression<Func<int, Expression>> f` in the second example, `Expression.Quote()` somehow force you call `Compile()` twice and plus one explicit casting e.g `((Expression<Func<int, int>>)f.Compile()(3)).Compile()(5)`
+
+If you don't want to use `Expression.Quote()`, you can do:
+
+```C#
+ParameterExpression x = Expression.Parameter(typeof(int), "x");
+ParameterExpression y = Expression.Parameter(typeof(int), "y");
+
+Expression<Func<int, Func<int, int>>> f = Expression.Lambda<Func<int, Func<int, int>>>(
+                                             Expression.Lambda<Func<int, int>>(Expression.Add(x, y), new ParameterExpression[] { y }),
+                                          new ParameterExpression[] { x });
+
+Console.WriteLine(f);   // x => y => (x + y)
+```
+
+------------------------------------------------------------------------------------------------
 ## A LINQ to SQL Provider
 
 ```C#
+//-------------------V
+public class Query<T> : IQueryable<T>
+{
+   private QueryProvider provider;
+   Expression expression;
+
+   public Query(QueryProvider provider)
+   {    
+      this.provider = provider;
+      this.expression = Expression.Constant(this);
+   }
+
+   public Query(QueryProvider provider, Expression expression)
+   {    
+      this.provider = provider;
+      this.expression = expression;
+   }
+
+   Expression IQueryable.Expression => this.expression;
+  
+   Type IQueryable.ElementType => typeof(T);
+  
+   IQueryProvider IQueryable.Provider => this.provider;
+  
+   public IEnumerator<T> GetEnumerator() => ((IEnumerable<T>)this.provider.Execute(this.expression)).GetEnumerator();
+
+   IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable)this.provider.Execute(this.expression)).GetEnumerator();
+  
+   public override string ToString() => this.provider.GetQueryText(this.expression);
+}
+//-------------------Ʌ
+
+//---------------------------------V
 public abstract class QueryProvider : IQueryProvider
 {
    protected QueryProvider() { }
 
-   IQueryable<T> IQueryProvider.CreateQuery<T>(Expression expression)
-   {
+   IQueryable<T> IQueryProvider.CreateQuery<T>(Expression expression)   // this is the method that called by Linq.Queryable.Where()
+   {                                                                    // expression here is MethodCallExpression that has two args
       return new Query<T>(this, expression);
    }
 
@@ -2193,7 +2322,7 @@ public abstract class QueryProvider : IQueryProvider
       }
    }
 
-   T IQueryProvider.Execute<T>(Expression expression)
+   T IQueryProvider.Execute<T>(Expression expression) 
    {
       return (T)this.Execute(expression);
    }
@@ -2207,7 +2336,8 @@ public abstract class QueryProvider : IQueryProvider
 
    public abstract object Execute(Expression expression);
 }
-
+//---------------------------------Ʌ
+//--------------------------V
 public class DbQueryProvider : QueryProvider
 {
    private readonly DbConnection connection;
@@ -2241,7 +2371,219 @@ public class DbQueryProvider : QueryProvider
       return new QueryTranslator().Translate(expression);
    }
 }
+//--------------------------Ʌ
 
+//----------------------------V
+internal class QueryTranslator : ExpressionVisitor
+{
+    StringBuilder sb;
+
+    internal string Translate(Expression expression)
+    {
+        this.sb = new StringBuilder();
+        this.Visit(expression);
+        return this.sb.ToString();
+    }
+
+    private static Expression StripQuotes(Expression e)
+    {
+        while (e.NodeType == ExpressionType.Quote)
+        {
+            e = ((UnaryExpression)e).Operand;
+        }
+
+        return e;
+    }
+
+    protected override Expression VisitMethodCall(MethodCallExpression m)
+    {
+        if (m.Method.DeclaringType == typeof(Queryable) && m.Method.Name == "Where")
+        {
+            sb.Append("SELECT * FROM (");
+            this.Visit(m.Arguments[0]);
+            sb.Append(") AS T WHERE ");
+            LambdaExpression lambda = (LambdaExpression)StripQuotes(m.Arguments[1]);
+            this.Visit(lambda.Body);
+            return m;
+        }
+
+        throw new NotSupportedException(string.Format("The method '{0}' is not supported", m.Method.Name));
+    }
+
+    protected override Expression VisitUnary(UnaryExpression u)
+    {
+        switch (u.NodeType)
+        {
+            case ExpressionType.Not:
+                sb.Append(" NOT ");
+                this.Visit(u.Operand);
+                break;
+
+            default:
+                throw new NotSupportedException(string.Format("The unary operator '{0}' is not supported", u.NodeType));
+        }
+
+        return u;
+    }
+
+    protected override Expression VisitBinary(BinaryExpression b)
+    {
+        sb.Append("(");
+
+        this.Visit(b.Left);
+
+        switch (b.NodeType)
+        {
+            case ExpressionType.And:
+                sb.Append(" AND ");
+                break;
+
+            case ExpressionType.Or:
+                sb.Append(" OR");
+                break;
+
+            case ExpressionType.Equal:
+                sb.Append(" = ");
+                break;
+
+            case ExpressionType.NotEqual:
+                sb.Append(" <> ");
+                break;
+
+            case ExpressionType.LessThan:
+                sb.Append(" < ");
+                break;
+
+            case ExpressionType.LessThanOrEqual:
+                sb.Append(" <= ");
+                break;
+
+            case ExpressionType.GreaterThan:
+                sb.Append(" > ");
+                break;
+
+            case ExpressionType.GreaterThanOrEqual:
+               sb.Append(" >= ");
+                break;
+
+            default:
+                throw new NotSupportedException(string.Format("The binary operator '{0}' is not supported", b.NodeType));
+        }
+
+        this.Visit(b.Right);
+
+        sb.Append(")");
+
+        return b;
+    }
+
+    protected override Expression VisitConstant(ConstantExpression c)
+    {
+        IQueryable q = c.Value as IQueryable;   // <-------------------- this is important, C1
+
+        if (q != null)
+        {
+            // assume constant nodes w/ IQueryables are table references
+            sb.Append("SELECT * FROM ");
+            sb.Append(q.ElementType.Name);
+        }
+        else if (c.Value == null)
+        {
+            sb.Append("NULL");
+        }
+        else
+        {
+            switch (Type.GetTypeCode(c.Value.GetType()))
+            {
+                case TypeCode.Boolean:
+                    sb.Append(((bool)c.Value) ? 1 : 0);
+                    break;
+
+                case TypeCode.String:
+                    sb.Append("'");
+                    sb.Append(c.Value);
+                    sb.Append("'");
+                    break;
+
+                case TypeCode.Object:
+                    throw new NotSupportedException(string.Format("The constant for '{0}' is not supported", c.Value));
+
+                default:
+                    sb.Append(c.Value);
+                    break;
+            }
+        }
+
+        return c;
+    }
+
+    protected override Expression VisitMemberAccess(MemberExpression m)
+    {
+        if (m.Expression != null && m.Expression.NodeType == ExpressionType.Parameter)
+        {
+            sb.Append(m.Member.Name);
+            return m;
+        }
+
+        throw new NotSupportedException(string.Format("The member '{0}' is not supported", m.Member.Name));
+    }
+}
+//----------------------------Ʌ
+
+//-------------------V
+internal static class TypeSystem
+{
+   internal static Type GetElementType(Type seqType)
+   {
+      Type ienum = FindIEnumerable(seqType);
+      if (ienum == null)
+         return seqType;
+
+      return ienum.GetGenericArguments()[0];
+   }
+
+   private static Type FindIEnumerable(Type seqType)
+   {
+      if (seqType == null || seqType == typeof(string))
+         return null;
+
+      if (seqType.IsArray)
+         return typeof(IEnumerable<>).MakeGenericType(seqType.GetElementType());
+
+      if (seqType.IsGenericType)
+      {
+         foreach (Type arg in seqType.GetGenericArguments())
+         {
+            Type ienum = typeof(IEnumerable<>).MakeGenericType(arg);
+            if (ienum.IsAssignableFrom(seqType))
+               return ienum;
+         }
+      }
+
+      Type[] ifaces = seqType.GetInterfaces();
+
+      if (ifaces != null && ifaces.Length > 0)
+      {
+         foreach (Type iface in ifaces)
+         {
+            Type ienum = FindIEnumerable(iface);
+
+            if (ienum != null)
+               return ienum;
+         }
+      }
+
+      if (seqType.BaseType != null && seqType.BaseType != typeof(object))
+      {
+         return FindIEnumerable(seqType.BaseType);
+      }
+
+      return null;
+   }
+}
+//-------------------Ʌ
+
+//----------------------------V
 internal class ObjectReader<T> : IEnumerable<T> where T : class, new()
 {
    Enumerator enumerator;
@@ -2366,276 +2708,7 @@ internal class ObjectReader<T> : IEnumerable<T> where T : class, new()
       }
    }
 }
-
-public class Query<T> : IQueryable<T>
-{
-   private QueryProvider provider;
-   Expression expression;
-
-   public Query(QueryProvider provider)
-   {
-      if (provider == null)
-         throw new ArgumentNullException("provider");
-
-      this.provider = provider;
-      this.expression = Expression.Constant(this);
-   }
-
-   public Query(QueryProvider provider, Expression expression)
-   {
-      if (provider == null)
-         throw new ArgumentNullException("provider");
-
-      if (expression == null)
-         throw new ArgumentNullException("expression");
-
-      if (!typeof(IQueryable<T>).IsAssignableFrom(expression.Type))
-         throw new ArgumentOutOfRangeException("expression");
-
-      this.provider = provider;
-      this.expression = expression;
-   }
-
-   Expression IQueryable.Expression
-   {
-      get { return this.expression; }
-   }
-
-   Type IQueryable.ElementType
-   {
-      get { return typeof(T); }
-   }
-
-   IQueryProvider IQueryable.Provider
-   {
-      get { return this.provider; }
-   }
-
-   public IEnumerator<T> GetEnumerator()
-   {
-      return ((IEnumerable<T>)this.provider.Execute(this.expression)).GetEnumerator();
-   }
-
-   IEnumerator IEnumerable.GetEnumerator()
-   {
-      return ((IEnumerable)this.provider.Execute(this.expression)).GetEnumerator();
-   }
-
-   public override string ToString()
-   {
-      return this.provider.GetQueryText(this.expression);
-   }
-}
-
-internal static class TypeSystem
-{
-   internal static Type GetElementType(Type seqType)
-   {
-      Type ienum = FindIEnumerable(seqType);
-      if (ienum == null)
-         return seqType;
-
-      return ienum.GetGenericArguments()[0];
-   }
-
-   private static Type FindIEnumerable(Type seqType)
-   {
-      if (seqType == null || seqType == typeof(string))
-         return null;
-
-      if (seqType.IsArray)
-         return typeof(IEnumerable<>).MakeGenericType(seqType.GetElementType());
-
-      if (seqType.IsGenericType)
-      {
-         foreach (Type arg in seqType.GetGenericArguments())
-         {
-            Type ienum = typeof(IEnumerable<>).MakeGenericType(arg);
-            if (ienum.IsAssignableFrom(seqType))
-               return ienum;
-         }
-      }
-
-      Type[] ifaces = seqType.GetInterfaces();
-
-      if (ifaces != null && ifaces.Length > 0)
-      {
-         foreach (Type iface in ifaces)
-         {
-            Type ienum = FindIEnumerable(iface);
-
-            if (ienum != null)
-               return ienum;
-         }
-      }
-
-      if (seqType.BaseType != null && seqType.BaseType != typeof(object))
-      {
-         return FindIEnumerable(seqType.BaseType);
-      }
-
-      return null;
-   }
-}
-
-internal class QueryTranslator : ExpressionVisitor
-{
-    StringBuilder sb;
-
-    internal QueryTranslator()
-    {
-    }
-
-    internal string Translate(Expression expression)
-    {
-        this.sb = new StringBuilder();
-        this.Visit(expression);
-        return this.sb.ToString();
-    }
-
-    private static Expression StripQuotes(Expression e)
-    {
-        while (e.NodeType == ExpressionType.Quote)
-        {
-            e = ((UnaryExpression)e).Operand;
-        }
-
-        return e;
-    }
-
-    protected override Expression VisitMethodCall(MethodCallExpression m)
-    {
-        if (m.Method.DeclaringType == typeof(Queryable) && m.Method.Name == "Where")
-        {
-            sb.Append("SELECT * FROM (");
-            this.Visit(m.Arguments[0]);
-            sb.Append(") AS T WHERE ");
-            LambdaExpression lambda = (LambdaExpression)StripQuotes(m.Arguments[1]);
-            this.Visit(lambda.Body);
-            return m;
-        }
-
-        throw new NotSupportedException(string.Format("The method '{0}' is not supported", m.Method.Name));
-    }
-
-    protected override Expression VisitUnary(UnaryExpression u)
-    {
-        switch (u.NodeType)
-        {
-            case ExpressionType.Not:
-                sb.Append(" NOT ");
-                this.Visit(u.Operand);
-                break;
-
-            default:
-                throw new NotSupportedException(string.Format("The unary operator '{0}' is not supported", u.NodeType));
-        }
-
-        return u;
-    }
-
-    protected override Expression VisitBinary(BinaryExpression b)
-    {
-        sb.Append("(");
-
-        this.Visit(b.Left);
-
-        switch (b.NodeType)
-        {
-            case ExpressionType.And:
-                sb.Append(" AND ");
-                break;
-
-            case ExpressionType.Or:
-                sb.Append(" OR");
-                break;
-
-            case ExpressionType.Equal:
-                sb.Append(" = ");
-                break;
-
-            case ExpressionType.NotEqual:
-                sb.Append(" <> ");
-                break;
-
-            case ExpressionType.LessThan:
-                sb.Append(" < ");
-                break;
-
-            case ExpressionType.LessThanOrEqual:
-                sb.Append(" <= ");
-                break;
-
-            case ExpressionType.GreaterThan:
-                sb.Append(" > ");
-                break;
-
-            case ExpressionType.GreaterThanOrEqual:
-               sb.Append(" >= ");
-                break;
-
-            default:
-                throw new NotSupportedException(string.Format("The binary operator '{0}' is not supported", b.NodeType));
-        }
-
-        this.Visit(b.Right);
-
-        sb.Append(")");
-
-        return b;
-    }
-
-    protected override Expression VisitConstant(ConstantExpression c)
-    {
-        IQueryable q = c.Value as IQueryable;
-
-        if (q != null)
-        {
-            // assume constant nodes w/ IQueryables are table references
-            sb.Append("SELECT * FROM ");
-            sb.Append(q.ElementType.Name);
-        }
-        else if (c.Value == null)
-        {
-            sb.Append("NULL");
-        }
-        else
-        {
-            switch (Type.GetTypeCode(c.Value.GetType()))
-            {
-                case TypeCode.Boolean:
-                    sb.Append(((bool)c.Value) ? 1 : 0);
-                    break;
-
-                case TypeCode.String:
-                    sb.Append("'");
-                    sb.Append(c.Value);
-                    sb.Append("'");
-                    break;
-
-                case TypeCode.Object:
-                    throw new NotSupportedException(string.Format("The constant for '{0}' is not supported", c.Value));
-
-                default:
-                    sb.Append(c.Value);
-                    break;
-            }
-        }
-
-        return c;
-    }
-
-    protected override Expression VisitMemberAccess(MemberExpression m)
-    {
-        if (m.Expression != null && m.Expression.NodeType == ExpressionType.Parameter)
-        {
-            sb.Append(m.Member.Name);
-            return m;
-        }
-
-        throw new NotSupportedException(string.Format("The member '{0}' is not supported", m.Member.Name));
-    }
-}
+//----------------------------Ʌ
 
 public class Customers
 {
@@ -2660,8 +2733,8 @@ public class Northwind
 
    public Northwind(DbConnection connection)
    {
-      QueryProvider provider = new DbQueryProvider(connection);
-      this.Customers = new Query<Customers>(provider);
+      QueryProvider provider = new DbQueryProvider(connection);   // <---------------------1.1
+      this.Customers = new Query<Customers>(provider);            // <---------------------1.2a
       this.Orders = new Query<Orders>(provider);
    }
 }
@@ -2669,20 +2742,23 @@ public class Northwind
 ```C#
 static void Main(string[] args)
 {
-   string constr = @"Server = DESKTOP-KLM1TNG; Database = Northwind; Trusted_Connection = True; MultipleActiveResultSets=true";
+   string constr = @"Server=DESKTOP-KLM1TNG; Database=Northwind; Trusted_Connection=True; MultipleActiveResultSets=true";
    using (SqlConnection con = new SqlConnection(constr))
    {
       con.Open();
-      Northwind db = new Northwind(con);
+      Northwind db = new Northwind(con);   // <---------------------1.0
 
       IQueryable<Customers> query =
-           db.Customers.Where(c => c.City == "London");
+           db.Customers.Where(c => c.City == "London");  // <---------------------2.0
+                                                         // every Where() creates a new Query<T> instance, and futher new Query<T> instance contains the first Query<T> instance
+                                                         // check 1.2b: this.expression = Expression.Constant(this); this is important, also check C1
+
+       // now `query` is Query<Customers> instance, whose `expression` property is a MethodCallExpression that contains the original Query<Customers> instance as 
+       // arg0 (repesented as ConstantExpression), and c => c.City == "London" expression as arg1
 
       Console.WriteLine("Query:\n{0}\n", query);
 
-      var list = query.ToList();
-
-      foreach (var item in list)
+      foreach (var item in list)    // <------------------------4.0, calls query's GetEnumerator()
       {
          Console.WriteLine("Name: {0}", item.ContactName);
       }
@@ -2690,97 +2766,97 @@ static void Main(string[] args)
       Console.ReadLine();
    }
 }
+
+public static class Queryable 
+{
+   // ...
+   public static IQueryable<TSource> Where<TSource>(this IQueryable<TSource> source, Expression<Func<TSource, bool>> predicate)  // <---------------------2.0
+   {
+      return source.Provider.CreateQuery<TSource>(
+         Expression.Call(    // <---------------------2.1               
+            null,
+            CachedReflectionInfo.Where_TSource_2(typeof(TSource)),
+            source.Expression,
+            Expression.Quote(predicate)
+         )
+      );
+   }
+}
+
+public class Query<T> : IQueryable<T>
+{
+   private QueryProvider provider;
+   Expression expression;
+
+   public Query(QueryProvider provider)  // <---------------------1.2b
+   {
+      this.provider = provider;
+      this.expression = Expression.Constant(this);  // <---------- wrap itself for the first time
+   }
+
+   public Query(QueryProvider provider, Expression expression)  // <---------------------3.1b
+   {                                                            
+      this.provider = provider;
+      this.expression = expression;
+   }
+
+   public IEnumerator<T> GetEnumerator()
+   {
+      return ((IEnumerable<T>)this.provider.Execute(this.expression)).GetEnumerator();  // <------------------------4.0
+   }
+
+   // ...
+}
+
+public abstract class QueryProvider : IQueryProvider
+{
+
+   IQueryable<T> IQueryProvider.CreateQuery<T>(Expression expression)   // <---------------------3.0, this is the method that called by Linq.Queryable.Where()
+   {
+      return new Query<T>(this, expression);   // <---------------------3.1a, expression here represents: c => c.City == "London"
+   }
+
+
+   T IQueryProvider.Execute<T>(Expression expression)
+   {
+      return (T)this.Execute(expression);  
+   }
+
+   public abstract string GetQueryText(Expression expression);
+
+   public abstract object Execute(Expression expression);
+
+   // ...
+}
+
+public class DbQueryProvider : QueryProvider
+{
+   private readonly DbConnection connection;
+
+   public DbQueryProvider(DbConnection connection)
+   {
+      this.connection = connection;
+   }
+
+   public override object Execute(Expression expression)   // <------------------------4.1
+   {
+      DbCommand cmd = this.connection.CreateCommand();
+      cmd.CommandText = this.Translate(expression);       // <------------------------5.0a
+      DbDataReader reader = cmd.ExecuteReader();          // reader has all the matching records available after the SQL statement is executed
+      Type elementType = TypeSystem.GetElementType(expression.Type);
+
+      return Activator.CreateInstance(
+          typeof(ObjectReader<>).MakeGenericType(elementType),
+          BindingFlags.Instance | BindingFlags.NonPublic, null,
+          new object[] { reader },
+          null);
+   }
+
+   private string Translate(Expression expression)
+   {
+      return new QueryTranslator().Translate(expression);   // <------------------------5.0b
+                                                            // QueryTranslator is a ExpressionVisitor that Visit all the nodes to genenrate SQL statment string
+   }
+}
 ```
 
-
-##  
-
-
-```C#
-ParameterExpression paramExpr = Expression.Parameter(typeof(int), "arg");
-
-// This expression represents a lambda expression
-// that adds 1 to the parameter value.
-LambdaExpression lambdaExpr = Expression.Lambda(
-    Expression.Add(
-        paramExpr,
-        Expression.Constant(1)
-    ),
-    new List<ParameterExpression>() { paramExpr }
-);
-
-// Print out the expression.
-Console.WriteLine(lambdaExpr.Type);        // Func<int, int>
-Console.WriteLine(lambdaExpr.GetType());   // Expression<Func<int, int>>
-```
-
-
-
-
-https://stackoverflow.com/questions/3138133/what-is-the-purpose-of-linqs-expression-quote-method
-https://stackoverflow.com/questions/3716492/what-does-expression-quote-do-that-expression-constant-can-t-already-do/3753382#3753382
-difference between `UnaryExpression` and `ConstantExpression`
-
-```C#
-/* nested lambda
-(int s) => (int t) => s+t  
-*/
-
-var ps = Expression.Parameter(typeof(int), "s");
-var pt = Expression.Parameter(typeof(int), "t");
-
-//
-var ex1 = Expression.Lambda(
-             Expression.Lambda(
-                Expression.Add(ps, pt),
-             pt),
-          ps);
-
-var f1a = (Func<int, Func<int, int>>)ex1.Compile();   // OK
-var f1b = f1a(100);
-Console.WriteLine(f1b(123));
-
-// now let's say we want to represent: (int s) => Expression.Lambda(Expression.Add(...
-var ex2 = Expression.Lambda(
-             Expression.Quote(   // <------------- have to use Expression.Quote
-                Expression.Lambda(
-                   Expression.Add(ps, pt),
-                pt)
-             ),
-          ps);
-
-var f2a = (Func<int, Expression<Func<int, int>>>)ex2.Compile();
-Func<int, int> f2b = f2a(200).Compile();   // OK
-Console.WriteLine(f2b(123));
-
-var ex3 = Expression.Lambda(
-             Expression.Constant(  // <------------- cannot use Expression.Constant
-                Expression.Lambda(
-                   Expression.Add(ps, pt),
-                pt)
-             ),
-          ps);
-
-var f3a = (Func<int, Expression<Func<int, int>>>)ex3.Compile();
-var f3b = f3a(300).Compile();   // throws exception at Compile(): variable s of type System.Int32 is not defined 
-// Console.WriteLine(f3b(123));   
-
-// ConstantExpression doesn't have closure semantics, so somehow Compile method (the ex3.Compile(), not f3a(300).Compile()) doesn't further "process" it (my understanding)
-```
-
-![alt text](./zImages/6.png "ConstantExpression doesn't have ParameterExpression")
-
-
-Another example on `Expression.Quote()`:
-
-```C#
-// to implement: x => y => (x + y)
-ParameterExpression x = Expression.Parameter(typeof(int), "x");
-ParameterExpression y = Expression.Parameter(typeof(int), "y");
-
-Expression<Func<int, Expression>> f = Expression.Lambda<Func<int, Expression>>(
-                                         Expression.Quote(  Expression.Lambda<Func<int, int>>(Expression.Add(x, y), y)  ),
-                                                                               x);
-
-Console.WriteLine(f);   //  x => y => (x + y)
-```
