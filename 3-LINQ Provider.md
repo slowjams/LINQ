@@ -2,7 +2,245 @@
 
 ===============================================
 
-A LINQ to SQL Provider:
+## Demystifying `IQueryable<T>`
+
+```C#
+//----------------------------V
+public interface IQueryable<T> : IEnumerable<T>, IQueryable { }
+
+public interface IOrderedQueryable<T> : IQueryable<T>, IOrderedQueryable { }  // public interface IOrderedQueryable : IQueryable { }
+
+public interface IQueryable : IEnumerable 
+{
+   Type ElementType { get; }
+
+   Expression Expression { get; }
+
+   IQueryProvider Provider { get; }
+}
+
+public interface IQueryProvider
+{
+   IQueryable CreateQuery(Expression expression);
+
+   IQueryable<TElement> CreateQuery<TElement>(Expression expression);
+
+   object Execute(Expression expression);
+
+   TResult Execute<TResult>(Expression expression);
+}
+//----------------------------Ʌ
+
+//---------------------------V
+public static class Queryable  // Enumerable's counterpart, Queryable has the same methods as Enumerable's, but the predicate argument is an Expression, not a delegate
+{
+   public static IQueryable<TElement> AsQueryable<TElement>(this IEnumerable<TElement> source)
+   {
+      return new EnumerableQuery<TElement>(source);  // return source as IQueryable<TElement> ?? new EnumerableQuery<TElement>(source);  
+   }
+
+   public static IQueryable<TSource> Where<TSource>(this IQueryable<TSource> source, Expression<Func<TSource, bool>> predicate)
+   {
+      return source.Provider.CreateQuery<TSource>(
+         Expression.Call(
+            null,
+            //get the MethodInfo of new Func<IQueryable<object>, Expression<Func<object, bool>>, IQueryable<object>>(Queryable.Where)
+            CachedReflectionInfo.Where_TSource_2(typeof(TSource)), 
+            source.Expression,             // ConstExpression that wraps EnumerableQuery<T> (source itself)  AS arg0                               
+            Expression.Quote(predicate)    // UnaryExpression that wraps the predicate                       AS arg1
+            ));
+   }
+}
+//---------------------------Ʌ
+
+//-----------------------------------VV
+public abstract class EnumerableQuery 
+{
+   internal abstract Expression Expression { get; }
+   internal abstract IEnumerable Enumerable { get; }
+
+   internal EnumerableQuery() { }
+
+   internal static IQueryable Create(Type elementType, IEnumerable sequence)
+   {
+      Type seqType = typeof(EnumerableQuery<>).MakeGenericType(elementType);
+      return (IQueryable)Activator.CreateInstance(seqType, sequence);
+   }
+
+   internal static IQueryable Create(Type elementType, Expression expression)  //  create an IQueryable instance that can evaluate the query tree
+   {
+      Type seqType = typeof(EnumerableQuery<>).MakeGenericType(elementType);
+      return (IQueryable)Activator.CreateInstance(seqType, expression)!;       // this newly created EnumerableQuery<T> instance's _enumerable is null
+   }
+}
+
+public class EnumerableQuery<T> : EnumerableQuery, IOrderedQueryable<T>, IQueryProvider  // it is both of IQueryable and IQueryProvider, while the counterpart in the Linq to SQL 
+{                                                                                        // in the next section, IQueryable and IQueryProvider are separated
+   private readonly Expression _expression;
+   private IEnumerable<T> _enumerable;
+
+   public EnumerableQuery(Expression expression) { _expression = expression; }
+
+   public EnumerableQuery(IEnumerable<T> enumerable)
+   {
+      _enumerable = enumerable;
+      _expression = Expression.Constant(this);
+   }
+
+   internal override Expression Expression => _expression;
+   internal override IEnumerable Enumerable => _enumerable;
+
+   IQueryProvider IQueryable.Provider => this;  // <----------------
+
+   Type IQueryable.ElementType => typeof(T);
+
+   Expression IQueryable.Expression => _expression;
+
+   IQueryable IQueryProvider.CreateQuery(Expression expression)
+   {
+      Type iqType = TypeHelper.FindGenericType(typeof(IQueryable<>), expression.Type);
+      return Create(iqType.GetGenericArguments()[0], expression);
+   }
+
+   IQueryable<TElement> IQueryProvider.CreateQuery<TElement>(Expression expression)
+   {
+      return new EnumerableQuery<TElement>(expression);   // for Where(), expression is MethodCallExpression whose arg0 is ConstExpression that wraps source itself, 
+                                                          // arg1 is UnaryExpression that wraps the predicate
+   }
+
+   object IQueryProvider.Execute(Expression expression)
+   {
+      return EnumerableExecutor.Create(expression).ExecuteBoxed();
+   }
+
+   TElement IQueryProvider.Execute<TElement>(Expression expression)
+   {
+      return new EnumerableExecutor<TElement>(expression).Execute();
+   }
+
+   IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+   IEnumerator<T> IEnumerable<T>.GetEnumerator() => GetEnumerator();
+
+   private IEnumerator<T> GetEnumerator()
+   {
+      if (_enumerable == null)   // optimized when you call AsQueryable() but don't call Where() etc, so it is still IEnumerable<T>
+      {
+         // EnumerableRewriter unwraps the first EnumerableQuery<T> (contains IEnumerable<T>) into a ConstantExpression and also unwrap the UnaryExpression (generated by 
+         // Expression.Quote), so don't worry about EnumerableRewriter source code, it just does some unimportant unwrapping
+         EnumerableRewriter rewriter = new EnumerableRewriter();  
+         Expression body = rewriter.Visit(_expression);   // both _expression and body (some nodes are unwrapped ) are MethodCallExpression        
+
+         // change Where(Const, x => filter) to () => Where(Const, x => filter) 
+         Expression<Func<IEnumerable<T>>> f = Expression.Lambda<Func<IEnumerable<T>>>(body, (IEnumerable<ParameterExpression>?)null);  // <--------------------- C2
+         IEnumerable<T> enumerable = f.Compile()();
+         //
+         if (enumerable == this)
+            throw Error.EnumeratingNullEnumerableExpression();
+         _enumerable = enumerable;
+      }
+      return _enumerable.GetEnumerator();
+   }
+
+   /*
+   note that the two statement in C2 are very important, it applys the delegate (represented by the Expression) to the IEnumerable<T> source, it allows you dynamically
+   create Expression according to users input at run time, this is exactly what we want in the Process filting example
+   */
+}
+//-----------------------------------ɅɅ
+
+//--------------------------------------VV
+public abstract class EnumerableExecutor
+{
+   internal abstract object? ExecuteBoxed();
+
+   internal EnumerableExecutor() { }
+
+   internal static EnumerableExecutor Create(Expression expression)
+   {
+      Type execType = typeof(EnumerableExecutor<>).MakeGenericType(expression.Type);
+      return (EnumerableExecutor)Activator.CreateInstance(execType, expression)!;
+   }
+}
+
+public class EnumerableExecutor<T> : EnumerableExecutor
+{
+   private readonly Expression _expression;
+
+   public EnumerableExecutor(Expression expression) => _expression = expression;
+
+   internal override object? ExecuteBoxed() => Execute();
+
+   internal T Execute()
+   {
+      EnumerableRewriter rewriter = new EnumerableRewriter();
+      Expression body = rewriter.Visit(_expression);
+      Expression<Func<T>> f = Expression.Lambda<Func<T>>(body, (IEnumerable<ParameterExpression>?)null);
+      Func<T> func = f.Compile();
+      return func();
+   }
+}
+//--------------------------------------ɅɅ
+```
+
+compare the LINQ built-in, IQueryable, provider with our custom LINQ to SQL Provider that covered in the next section:
+
+`EnumerableQuery<T>` is both the default `IQueryable<T>` and the default `IQueryProvider`. The usage of it is limited to apply the delegate (represented by `Expression`) to the `IEnumerable<T>` souce, so that you can capture users' selection at run time and then apply the logic, in the case, the `IEnumerable<T>` souce is still on client's side, that's what we have done for the ProcessFilter.  In scenarios that the source is on server's side and  we need a custom provider e.g LINQ to SQL, `IQueryable<T>` and `IQueryProvider` are seperated.
+
+That's why `EnumerableQuery<T>`'s `GetEnumerator()` method doesn't use `Execute` method, while `Query<T>`'s `GetEnumerator()` method does call `DbQueryProvider` provider's `Execute` method to return another `IEnumerable<T>` source, in our case, it is a "Database Reader" which implements `IEnumerable<T>`, so when you are enumerating the source, you are actually enumerating another `IEnumerable<T>` created by `IQueryProvider.Execute(Expression expression)` method. So you can think that `IQueryProvider.Execute()` method is to create another `IEnumerable<T>` (e.g `ObjectReader<T>`) and inside `IQueryProvider.Execute()` method, the delegate logic represented by the `Expression` (actually it is `methodCallExpression`) will be applied on the source on server side, in our LINQ to SQL Provider, there is also another class `QueryTranslator` (a `ExpressionVisitor` ) that visits all the node to generate the SQL statement:
+
+Note that in C7,  having an explicit execute instead of just relying on IEnumerable.GetEnumerator() is important because it allows execution of expressions that do not necessarily yield sequences. For example, the query "myquery.Count()" returns a single integer. The expression tree for this query is a method call to the Count method that returns the integer. The Queryable.Count method (as well as the other aggregates and the like) use this method to execute the query ‘right now’.
+
+```C#
+public abstract class QueryProvider : IQueryProvider
+{
+   // ...
+   T IQueryProvider.Execute<T>(Expression expression)    // <-----------------------c7
+   {                                                   
+      return (T)this.Execute(expression);
+   }
+
+   object IQueryProvider.Execute(Expression expression)  // return object is ObjectReader<T>
+   {
+      return this.Execute(expression);
+   }
+}
+
+public class DbQueryProvider : QueryProvider
+{
+   private readonly DbConnection connection;
+   // ...
+   public override object Execute(Expression expression)  // return object is ObjectReader<T>
+   {
+      DbCommand cmd = this.connection.CreateCommand();
+      cmd.CommandText = this.Translate(expression);       
+      Type elementType = TypeSystem.GetElementType(expression.Type);
+
+      return Activator.CreateInstance(
+          typeof(ObjectReader<>).MakeGenericType(elementType),
+          BindingFlags.Instance | BindingFlags.NonPublic, null,
+          new object[] { reader },
+          null);
+   }
+
+   private string Translate(Expression expression)
+   {
+      return new QueryTranslator().Translate(expression);   
+                                                           
+   }
+}
+
+public class Query<T> : IQueryable<T>
+{
+   private QueryProvider provider;
+   Expression expression;
+   
+   public IEnumerator<T> GetEnumerator() => ((IEnumerable<T>)this.provider.Execute<AdvanceObjectReader<T>>(this.expression)).GetEnumerator();   // <--------C4
+   IEnumerator IEnumerable.GetEnumerator() => ((IEnumerable)this.provider.Execute(this.expression)).GetEnumerator();
+   // ...
+}
+```
+
+## A LINQ to SQL Provider
 
 ```C#
 //-------------------V
@@ -61,9 +299,10 @@ public abstract class QueryProvider : IQueryProvider
       }
    }
 
-   T IQueryProvider.Execute<T>(Expression expression) 
-   {
-      return (T)this.Execute(expression);
+   // this is for aggregation fucntion pupose such as Sum(), and we want the value immediately, so we don't enumerate the source. This example mainly implements and uses the non /// generic version, becuase we only demo the usage of Where(). You will see another provider code example in the last section which implements and use this method
+   T IQueryProvider.Execute<T>(Expression expression)                                                        
+   {                                                     
+      throw new NotImplementedException();
    }
 
    object IQueryProvider.Execute(Expression expression)
@@ -76,8 +315,9 @@ public abstract class QueryProvider : IQueryProvider
    public abstract object Execute(Expression expression);
 }
 //---------------------------------Ʌ
+
 //--------------------------V
-public class DbQueryProvider : QueryProvider
+public class DbQueryProvider : QueryProvider   // we can't use generic in provider like QueryProvider<T>, because a provider should return different types, see C5
 {
    private readonly DbConnection connection;
 
@@ -91,7 +331,7 @@ public class DbQueryProvider : QueryProvider
       return this.Translate(expression);
    }
 
-   public override object Execute(Expression expression)
+   public override object Execute(Expression expression)   // the return object could be ObjectReader<Customer>, ObjectReader<Order>  <----------------C5
    {
       DbCommand cmd = this.connection.CreateCommand();
       cmd.CommandText = this.Translate(expression);
@@ -449,7 +689,7 @@ internal class ObjectReader<T> : IEnumerable<T> where T : class, new()
 }
 //----------------------------Ʌ
 
-public class Customers
+public class Customer
 {
    public string CustomerID;
    public string ContactName;
@@ -458,7 +698,7 @@ public class Customers
    public string Country;
 }
 
-public class Orders
+public class Order
 {
    public int OrderID;
    public string CustomerID;
@@ -467,14 +707,14 @@ public class Orders
 
 public class Northwind
 {
-   public Query<Customers> Customers;
-   public Query<Orders> Orders;
+   public Query<Customer> Customers;
+   public Query<Order> Orders;
 
    public Northwind(DbConnection connection)
    {
       QueryProvider provider = new DbQueryProvider(connection);   // <---------------------1.1
-      this.Customers = new Query<Customers>(provider);            // <---------------------1.2a
-      this.Orders = new Query<Orders>(provider);
+      this.Customers = new Query<Customer>(provider);            // <---------------------1.2a
+      this.Orders = new Query<Order>(provider);
    }
 }
 ```
@@ -487,12 +727,12 @@ static void Main(string[] args)
       con.Open();
       Northwind db = new Northwind(con);   // <---------------------1.0
 
-      IQueryable<Customers> query =
+      IQueryable<Customer> query =
            db.Customers.Where(c => c.City == "London");  // <---------------------2.0
                                                          // every Where() creates a new Query<T> instance, and futher new Query<T> instance contains the first Query<T> instance
                                                          // check 1.2b: this.expression = Expression.Constant(this); this is important, also check C1
 
-       // now `query` is Query<Customers> instance, whose `expression` property is a MethodCallExpression that contains the original Query<Customers> instance as 
+       // now `query` is Query<Customer> instance, whose `expression` property is a MethodCallExpression that contains the original Query<Customer> instance as 
        // arg0 (repesented as ConstantExpression), and c => c.City == "London" expression as arg1
 
       Console.WriteLine(query.Expression.ToString());   // SELECT * FROM Customers.Where(c => (c.City == value(ConsoleAppLinqToSQL.Program+<>c__DisplayClass4_0).myCity))
@@ -609,10 +849,10 @@ var query = db.Customers.Where(c => c.City == city);
 Console.WriteLine(query.Expression.ToString());  // throws an exception: The member 'city' is not supported
 ```
 
-it is because of the code we have in:
+it is because of the code we have in the `QueryTranslator`:
 
 ```C#
-protected override Expression VisitMember(MemberExpression m)
+protected override Expression VisitMemberAccess(MemberExpression m)
 {
    if (m.Expression != null && m.Expression.NodeType == ExpressionType.Parameter)
    {
@@ -620,11 +860,38 @@ protected override Expression VisitMember(MemberExpression m)
       return m;
    }
 
-   throw new NotSupportedException(string.Format("The member '{0}' is not supported", m.Member.Name));  // <-----------
+   throw new NotSupportedException(string.Format("The member '{0}' is not supported", m.Member.Name));  
+   // we deliberately throw exception when MemberExpression's NodeType is not ExpressionType.Parameter,
+   // because we want to take care of the sepcial MemberExpression node with a ConstantExpression in its Expression property
+   // why we want to take specail care of it? Remember compiler generate a on the fly class and create an instance of that to represent MemberExpression
+   // check "How Compiler Handler Local Variable" for details, how is our translator going to access this value?
 }
 ```
 
--------------------------------------------------------------------------------------------------------------------
+You should be clear about the fix, we can do sth like:
+
+```C#
+protected override Expression VisitMemberAccess(MemberExpression m)
+{
+   if (m.Expression != null && m.Expression.NodeType == ExpressionType.Parameter)
+   {
+      sb.Append(m.Member.Name);
+      return m;
+   }
+   
+   if (m.Expression.NodeType == ExpressionType.Constant) 
+   {
+      // we can wrap MemberExpression m into LambdaExpression then compile it then Invoke the delegate to get the constant value, that's exactly what we are going to do
+      // in Evaluator covered in the next. The reason we don't do it here because it is not a generic fix, and it is not good to compile LambdaExpression in Visitor
+   }
+}
+```
+
+Below is the solution:
+
+don't worry about the details, it involves some logic like cache the Expressions that need to be evaluated and have some logic like if child node cannot be evaluated, then 
+parent node should not be evaluated too etc, we just focus on the core part of this solution, which is to wrap eligible `MemberExpression` and then complie it to get the represented `Delegate`, then invoke the delegate to get the value then wrap the value into a `ConstantExpression`
+
 ```C#
 public static class Evaluator
 {
@@ -675,10 +942,10 @@ public class SubtreeEvaluator : ExpressionVisitor
       if (e.NodeType == ExpressionType.Constant)
          return e;
 
-      LambdaExpression lambda = Expression.Lambda(e);
-
+      // 
+      LambdaExpression lambda = Expression.Lambda(e);   // <------------------------------ the most essential part of this solution
       Delegate fn = lambda.Compile();
-
+      //
       return Expression.Constant(fn.DynamicInvoke(null), e.Type);
    }
 }
@@ -719,7 +986,6 @@ public class Nominator : ExpressionVisitor
             {
                this.cannotBeEvaluated = true;
             }
-
          }
 
          this.cannotBeEvaluated |= saveCannotBeEvaluated;
@@ -730,10 +996,65 @@ public class Nominator : ExpressionVisitor
 }
 ```
 
-object? Execute(Expression expression);  // The <see cref="Execute"/> method executes queries that return a single value (instead of an enumerable sequence of values). Expression trees that represent queries that return enumerable results are executed when their associated <see cref="IQueryable"/> object is enumerated.    
+Now you can use it in the provider:
 
-Figure it out what happen when you call Where on IEnumerable<T> more than once
+```C#
+public class DbQueryProvider : QueryProvider
+{
+   // ...
+   private string Translate(Expression expression) 
+   {
+      expression = Evaluator.PartialEval(expression);  // after execute it, the expression's all MemberExpression nodes becomes ConstantExpression node
+                                                       // which can be analysed by the translator easily
+      return new QueryTranslator().Translate(expression);
+   }
+}
+```
 
+Another provider that supports aggregation fucntion:
+
+https://weblogs.asp.net/dixin/understanding-linq-to-sql-10-implementing-linq-to-sql-provider
+```C#
+public class QueryProvider : IQueryProvider
+{
+    // Translates LINQ query to SQL.
+    private readonly Func<IQueryable, DbCommand> _translator;
+
+    // Executes the translated SQL and retrieves results.
+    private readonly Func<Type, string, object[], IEnumerable> _executor;
+
+    public QueryProvider(
+        Func<IQueryable, DbCommand> translator,
+        Func<Type, string, object[], IEnumerable> executor)
+    {
+        this._translator = translator;
+        this._executor = executor;
+    }
+
+    public IQueryable<TElement> CreateQuery<TElement>(Expression expression)
+    {
+        return new Queryable<TElement>(this, expression);
+    }
+
+    public IQueryable CreateQuery(Expression expression)
+    {
+        throw new NotImplementedException();
+    }
+
+    public TResult Execute<TResult>(Expression expression)   // support both aggregration and non aggregration functions
+    {
+        bool isCollection = typeof(TResult).IsGenericType &&
+            typeof(TResult).GetGenericTypeDefinition() == typeof(IEnumerable<>);  // <-----------------   
+        // ...
+        return isCollection ? (TResult)queryResult : queryResult.OfType<TResult>().SingleOrDefault(); // Returns a single item.
+    }
+
+    public object Execute(Expression expression)  // <----------------unlike the previous provider example, this provider only uses the generic one
+    {
+        throw new NotImplementedException();
+    }
+}
+```
 
 
 <style type="text/css">
