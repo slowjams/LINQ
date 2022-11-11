@@ -370,7 +370,7 @@ public partial class Lookup<TKey, TElement> : ILookup<TKey, TElement>
    // ...
 }
 
-public interface IGrouping<TKey,TElement> : IEnumerable<TElement>
+public interface IGrouping<TKey,TElement> : IEnumerable<TElement>  // <-----------------------------
 {
    TKey Key { get; }
 }
@@ -647,7 +647,7 @@ join identifier in inner-sequence on outer-key-selector equals inner-key-selecto
 */
 
 var categoriesAndProducts = from c in categories                               
-                            join p in products on c.IdCategory equals p.IdCategory  //  SQL let you swap operands, query expression require "outter equals inner"
+                            join p in products on c.IdCategory equals p.IdCategory  //  SQL let you swap operands, but query expression require "outter equals inner"
                             select new {
                                CategoryID = c.IdCategory,
                                CategoryName = c.Name,
@@ -778,7 +778,7 @@ var q = categories.GroupJoin(products, c => c.IdCategory, p => p.IdCategory, (c,
 //----------------Ʌ
 ```
 
-Note that once you use `into`, the inner range variable goes out of the scope:
+Note that once you use `into`, the inner range variable goes out of the scope (outter range variable still valid):
 
 ```C#
 // code doesn't compile
@@ -787,7 +787,7 @@ var q = from c in categories
         select new {
            CategoryID = c.IdCategory,
            CategoryName = c.Name,
-           Product = p.Description   // cannot access `p` any more
+           Product = p.Description   // cannot access `p` any more, and if you think about it, it is like the groupby in SQL, that you cannot access a non aggregated column
         };
 
 // as long as you use into, it get translated into GroupJoin call,  even when you are not accessing the new temp variable, 
@@ -882,8 +882,8 @@ List<Cat> cats = new() { new(Name: "Barley", Owner: p1), new("Boots", Owner: p3)
 List<Dog> dogs = new() { new(Name: "Duke", Owner: p1), new("Denim", p2), new("Wiley", Owner: p3) };
 
 var q = from person in people
-        join cat in cats on person equals cat.Owner  // first note the join kney doesn't need to be primitve type, it can be reference type
-        join dog in dogs on person equals dog.Owner  //  the person range variable in the second join is actlly lifted as anon.person
+        join cat in cats on person equals cat.Owner  // first note the join key doesn't need to be primitve type, it can be reference type
+        join dog in dogs on person equals dog.Owner  // the person range variable in the second join is actlly lifted as anon.person
         select new {
            person,
            cat,

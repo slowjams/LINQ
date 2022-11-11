@@ -8,7 +8,9 @@ Source Code:
 //---------------------------------------V
 public class Expression<TDelegate> : LambdaExpression 
 {
-   public TDelegate Compile();  // get comipler to generate IL code that has the logic of the expression tree
+   public TDelegate Compile();  // get comipler to generate IL code that has the logic of the expression tree, it is like compiler writes a function for you
+                                // this is probably the most concise, stratforward and important explanation
+                                
    public TDelegate Compile(bool preferInterpretation);
    public TDelegate Compile(DebugInfoGenerator debugInfoGenerator);
 
@@ -1198,7 +1200,137 @@ Expression<Func<int, Func<int, int>>> f = Expression.Lambda<Func<int, Func<int, 
 Console.WriteLine(f);   // x => y => (x + y)
 ```
 
+## NewExpression
 
+see the example of `ComplexObjectModelBinder`
+
+```C#
+public interface IArgumentProvider
+{
+   Expression GetArgument(int index);
+
+   int ArgumentCount
+   {
+      get;
+   }
+}
+```
+
+```C#
+//------------------------V
+public class NewExpression : Expression, IArgumentProvider
+{
+   private IReadOnlyList<Expression> _arguments;
+ 
+   internal NewExpression(ConstructorInfo? constructor, IReadOnlyList<Expression> arguments, ReadOnlyCollection<MemberInfo>? members)
+   {
+      Constructor = constructor;
+      _arguments = arguments;
+      Members = members;
+   }
+
+   public override Type Type => Constructor!.DeclaringType!;
+
+   public sealed override ExpressionType NodeType => ExpressionType.New;
+
+   public ConstructorInfo? Constructor { get; }
+
+   public ReadOnlyCollection<Expression> Arguments => ExpressionUtils.ReturnReadOnly(ref _arguments);
+
+   public Expression GetArgument(int index) => _arguments[index];
+
+   public int ArgumentCount => _arguments.Count;
+
+   public ReadOnlyCollection<MemberInfo>? Members { get; }
+
+   protected internal override Expression Accept(ExpressionVisitor visitor)
+   {
+      return visitor.VisitNew(this);
+   }
+
+   public NewExpression Update(IEnumerable<Expression>? arguments)
+   {
+      if (ExpressionUtils.SameElements(ref arguments, Arguments))
+      {
+         return this;
+      }
+ 
+      return Members != null ? New(Constructor!, arguments, Members) : New(Constructor!, arguments);
+   }
+}
+//------------------------Ʌ
+
+
+//-----------------------------V
+public partial class Expression
+{
+   public static NewExpression New(ConstructorInfo constructor)
+   {
+      return New(constructor, (IEnumerable<Expression>?)null);
+   }
+
+   public static NewExpression New(ConstructorInfo constructor, params Expression[]? arguments)
+   {
+      return New(constructor, (IEnumerable<Expression>?)arguments);
+   }
+
+   public static NewExpression New(ConstructorInfo constructor, IEnumerable<Expression>? arguments)
+   {
+      TypeUtils.ValidateType(constructor.DeclaringType!, nameof(constructor), allowByRef: true, allowPointer: true);
+      ValidateConstructor(constructor, nameof(constructor));
+      ReadOnlyCollection<Expression> argList = arguments.ToReadOnly();
+      ValidateArgumentTypes(constructor, ExpressionType.New, ref argList, nameof(constructor));
+ 
+      return new NewExpression(constructor, argList, null);
+   }
+
+   public static NewExpression New(ConstructorInfo constructor, IEnumerable<Expression>? arguments, IEnumerable<MemberInfo>? members)
+   {
+      TypeUtils.ValidateType(constructor.DeclaringType!, nameof(constructor), allowByRef: true, allowPointer: true);
+      ValidateConstructor(constructor, nameof(constructor));
+      ReadOnlyCollection<MemberInfo> memberList = members.ToReadOnly();
+      ReadOnlyCollection<Expression> argList = arguments.ToReadOnly();
+      ValidateNewArgs(constructor, ref argList, ref memberList);
+      return new NewExpression(constructor, argList, memberList);
+   }
+
+   public static NewExpression New(Type type)
+   {
+      TypeUtils.ValidateType(type, nameof(type));
+ 
+      ConstructorInfo? ci = type.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic).SingleOrDefault(c => c.GetParametersCached().Length == 0);
+      
+      if (ci != null)
+      {
+         return New(ci);
+      }
+
+      if (!type.IsValueType)
+      {
+         throw Error.TypeMissingDefaultConstructor(type, nameof(type));
+      }
+
+      return new NewValueTypeExpression(type, ReadOnlyCollection<Expression>.Empty, null);
+   }
+
+   private static void ValidateNewArgs(ConstructorInfo constructor, ref ReadOnlyCollection<Expression> arguments, ref ReadOnlyCollection<MemberInfo> members)
+   {
+      // ...
+   }
+
+   private static void ValidateAnonymousTypeMember(ref MemberInfo member, out Type memberType, string paramName, int index)
+   {
+      // ...
+   }
+
+   private static void ValidateConstructor(ConstructorInfo constructor, string paramName)
+   {
+      if (constructor.IsStatic)
+         throw Error.NonStaticConstructorRequired(paramName);
+   }
+}
+//-----------------------------Ʌ
+```
 
 <style type="text/css">
 .markdown-body {
