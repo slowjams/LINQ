@@ -12,7 +12,8 @@ public static partial class Enumerable
 
    public static IEnumerable<TSource> Where<TSource>(this IEnumerable<TSource> source, Func<TSource, int, bool> predicate);  // using index is not supported by query expression
 
-   public static IEnumerable<TResult> Select<TSource, TResult>(this IEnumerable<TSource> source, Func<TSource, TResult> selector) {
+   public static IEnumerable<TResult> Select<TSource, TResult>(this IEnumerable<TSource> source, Func<TSource, TResult> selector) 
+   {
       if (source is Iterator<TSource> iterator) 
       {
          return iterator.Select(selector);
@@ -137,14 +138,14 @@ public static partial class Enumerable
    }
    //--------------------------------Ʌ
 
-   public static TSource Aggregate<TSource>(this IEnumerable<TSource> source, Func<TSource, TSource, TSource> func)  // use first item in the list as starting point
+   public static TSource Aggregate<TSource>(this IEnumerable<TSource> source, Func<TSource, TSource, TSource> func)  // use first item in the list as "seed"
    {
       using (IEnumerator<TSource> e = source.GetEnumerator()) 
       {
          if (!e.MoveNext())
             ThrowHelper.ThrowNoElementsException();
 
-         TSource result = e.Current;
+         TSource result = e.Current;  // <------------compare with the one below
          while (e.MoveNext()) 
          {
             result = func(result, e.Current);   // e.Current is actually "next"
@@ -156,11 +157,11 @@ public static partial class Enumerable
 
    public static TAccumulate Aggregate<TSource, TAccumulate>(this IEnumerable<TSource> source, TAccumulate seed, Func<TAccumulate, TSource, TAccumulate> func)
    {
-      TAccumulate result = seed;
+      TAccumulate result = seed;  // <------------compare with the one above
 
       foreach (TSource element in source)
       {
-         result = func(result, element);
+         result = func(result, element);  // result's first value is seed, then it will be each item in the list
       }
 
       return result;
@@ -169,7 +170,7 @@ public static partial class Enumerable
    public static TResult Aggregate<TSource, TAccumulate, TResult>(this IEnumerable<TSource> source, 
                                                                   TAccumulate seed, 
                                                                   Func<TAccumulate, TSource, TAccumulate> func, 
-                                                                  Func<TAccumulate, TResult> resultSelector)     // doesn' look very useful
+                                                                  Func<TAccumulate, TResult> resultSelector)     // used sometimes, doesn' look very useful
    {
       TAccumulate result = seed;
       
@@ -953,15 +954,84 @@ var q = list.TakeWhile(x => x <= 3);   // 1, 2, 3
 var q = list.SkipWhile(x => x <= 3);   // 4, 5, -1, -2
 ```
 
-<style type="text/css">
-.markdown-body {
-  max-width: 1800px;
-  margin-left: auto;
-  margin-right: auto;
-}
-</style>
+## SelectMany and Multiple `from` clause
 
-<link rel="stylesheet" href="./zCSS/bootstrap.min.css">
-<script src="./zCSS/jquery-3.3.1.slim.min.js"></script>
-<script src="./zCSS/popper.min.js"></script>
-<script src="./zCSS/bootstrap.min.js"></script>
+```C#
+// setup data
+public class Person
+{
+   public Person(string name, IEnumerable<Car> cars)
+   {
+      Name = name;
+      Cars = cars;
+   }
+
+   public IEnumerable<Car> Cars { get; set; }
+   public string Name { get; set; }
+}
+
+public class Car
+{
+   public Car(string name, IEnumerable<Service> services)
+   {
+      Name = name;
+      Services = services;
+   }
+
+   public string Name { get; set; }
+
+   public IEnumerable<Service> Services { get; set; }
+}
+
+public class Service
+{
+   public Service(string name)
+   {
+      Name = name;
+   }
+
+   public string Name { get; set; }
+}
+
+static IEnumerable<Person> GetData()
+{
+   IEnumerable<Service> servicesOne = new List<Service>() { new Service("Toyota City"), new Service("Toyota Parramatta") };
+   IEnumerable<Service> servicesTwo = new List<Service>() { new Service("Subaru City"), new Service("Subaru Parramatta") };
+   IEnumerable<Service> servicesThree = new List<Service>() { new Service("BMW Chatswood"), new Service("BMW Gordon") };
+   IEnumerable<Service> servicesFour = new List<Service>() { new Service("Lexus Chatswood"), new Service("Lexus Gordon") };
+
+   IEnumerable<Car> carsOne = new List<Car>() { new Car("Toyota", servicesOne), new Car("Subaru", servicesTwo) };
+   IEnumerable<Car> carsTwo = new List<Car>() { new Car("BMW", servicesThree), new Car("Lexus", servicesFour) };
+
+   Person p1 = new Person("Michael", carsOne);
+   Person p2 = new Person("John", carsTwo);
+
+   List<Person> persons = new List<Person> { p1, p2 };
+
+   return persons;
+}
+```
+
+```C#
+static void Main(string[] args)
+{
+   IEnumerable<Person> persons = GetData();
+
+   var r1 =
+      from p in persons
+      from c in p.Cars
+      select new { PersonName = p.Name, CarName = c.Name };
+
+   var r1_same = persons.SelectMany(p => p.Cars, (p, c) => new { PersonName = p.Name, CarName = c.Name });
+
+   var r2 =
+      from p in persons
+      from c in p.Cars
+      from s in c.Services
+      select new { PersonName = p.Name, CarName = c.Name, ServiceName = s.Name };
+
+   var r2_same = persons
+      .SelectMany(p => p.Cars, (p, c) => new { p = p, c = c })
+      .SelectMany(anon => anon.c.Services, (anon, s) => new { PersonName = anon.p.Name, CarName = anon.c.Name, ServiceName = s.Name });
+}
+```
